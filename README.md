@@ -61,6 +61,7 @@ HASDATA_API_KEY=
 
 ## Segurança
 
-- `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` é a chave pública destinada ao cliente e o acesso aos dados é protegido por RLS.
-- `HASDATA_API_KEY` deve existir somente no ambiente de servidor/Vercel.
+- o repositório pode ser público; nenhuma chave real deve ser versionada;
+- `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` é a chave pública destinada ao cliente e o acesso aos dados é protegido por RLS;
+- `HASDATA_API_KEY` deve existir somente no ambiente de servidor/Vercel;
 - `SUPABASE_SERVICE_ROLE_KEY` não é necessária para o fluxo atual e não deve ser exposta ao cliente.
