@@ -20,6 +20,10 @@ export function normalizeSourceText(value: string) {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 }
 
+function compact(value: string) {
+  return normalizeSourceText(value).replace(/[\s_-]+/g, "");
+}
+
 function containsNonBuyerPattern(value: string) {
   const normalized = normalizeSourceText(value);
   return NON_BUYER_PROFILE_PATTERNS.some((pattern) => normalized.includes(normalizeSourceText(pattern)));
@@ -46,11 +50,59 @@ export function profileLooksLikeNonBuyer(profileName: string) {
   return containsNonBuyerPattern(profile);
 }
 
+function purchaseTargetsAnotherItem(analysis: Analysis, publicationText: string) {
+  const product = analysis.product;
+  if (!product) return false;
+
+  const text = normalizeSourceText(publicationText);
+  const textCompact = compact(publicationText);
+  const productCompact = compact(product);
+  if (!productCompact || !textCompact.includes(productCompact)) return false;
+
+  const ownershipMarkers = ["ja tenho", "eu tenho", "tenho uma", "tenho um"];
+  const ownershipIndex = ownershipMarkers
+    .map((marker) => text.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  if (ownershipIndex == null) return false;
+
+  const ownershipWindow = text.slice(ownershipIndex, ownershipIndex + 120);
+  if (!compact(ownershipWindow).includes(productCompact)) return false;
+
+  const purchaseMarkers = ["quero comprar", "preciso comprar", "vou comprar", "estou procurando", "onde comprar"];
+  for (const marker of purchaseMarkers) {
+    let from = ownershipIndex + 1;
+    while (from < text.length) {
+      const purchaseIndex = text.indexOf(marker, from);
+      if (purchaseIndex < 0) break;
+      const after = text.slice(purchaseIndex, purchaseIndex + 120);
+      if (!compact(after).includes(productCompact)) return true;
+      from = purchaseIndex + marker.length;
+    }
+  }
+
+  return false;
+}
+
 function weakBand(): LeadBand {
   return "Sinal fraco";
 }
 
-export function applyAttributionGuard(analysis: Analysis, profileName: string, _publicationText: string): Analysis {
+export function applyAttributionGuard(analysis: Analysis, profileName: string, publicationText: string): Analysis {
+  if (purchaseTargetsAnotherItem(analysis, publicationText)) {
+    const score = Math.min(analysis.score, 45);
+    const signal = "A pessoa parece já possuir o produto monitorado; a intenção de compra está direcionada a outro item";
+    return {
+      ...analysis,
+      score,
+      band: weakBand(),
+      intent: "weak",
+      relevance: Math.min(analysis.relevance, 40),
+      signals: analysis.signals.includes(signal) ? analysis.signals : [...analysis.signals, signal],
+      reason: signal,
+    };
+  }
+
   if (!profileLooksLikeNonBuyer(profileName)) return analysis;
 
   const score = Math.min(analysis.score, 40);
