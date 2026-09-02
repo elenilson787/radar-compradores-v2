@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./cloud.css";
 
 export const metadata: Metadata = {
   title: "Radar de Compradores V2",
