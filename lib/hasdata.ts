@@ -189,6 +189,10 @@ export async function searchHasData(campaign: Campaign, apiKey: string) {
         params.set("gl", "br");
         params.set("hl", "pt");
       }
+      if (source === "Facebook") {
+        params.set("tbs", "qdr:m,sbd:1");
+        params.set("num", "20");
+      }
       const response = await fetch(`https://api.hasdata.com/scrape/google/serp?${params.toString()}`, {
         headers: { "x-api-key": apiKey },
         cache: "no-store",
@@ -202,7 +206,7 @@ export async function searchHasData(campaign: Campaign, apiKey: string) {
       }
 
       const data = await response.json() as { organicResults?: Array<Record<string, unknown>> };
-      return (data.organicResults ?? []).map((result) => {
+      const mapped = (data.organicResults ?? []).map((result) => {
         const title = cleanText(result.title);
         const snippet = cleanText(result.snippet);
         const dateLabel = cleanText(result.date);
@@ -220,6 +224,15 @@ export async function searchHasData(campaign: Campaign, apiKey: string) {
         const inferredSource = inferSource(source, publicationUrl);
         return { source: inferredSource, profileName, publicationUrl, publicationText, publishedAt } satisfies PublicSearchResult;
       }).filter((item): item is PublicSearchResult => Boolean(item));
+
+      if (source === "Facebook") {
+        mapped.sort((a, b) => {
+          const aTime = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
+          const bTime = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
+          return bTime - aTime;
+        });
+      }
+      return mapped;
     } catch (error) {
       warnings.push(`${source}: ${error instanceof Error ? error.message : "falha de consulta"}`);
       return [] as PublicSearchResult[];
