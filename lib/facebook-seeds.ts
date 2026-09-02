@@ -23,6 +23,32 @@ function cleanText(value: unknown) {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
 }
 
+function parseRelativeDate(value: string) {
+  const text = normalize(value.trim());
+  const match = text.match(/^(?:ha\s+)?(\d+)\s+(minuto|hora|dia|semana|mes|ano|minute|hour|day|week|month|year)s?(?:\s+ago)?$/);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount)) return null;
+  const unit = match[2];
+  const unitMs = unit.startsWith("min") ? 60_000
+    : unit.startsWith("hora") || unit.startsWith("hour") ? 3_600_000
+    : unit.startsWith("dia") || unit.startsWith("day") ? 86_400_000
+    : unit.startsWith("semana") || unit.startsWith("week") ? 7 * 86_400_000
+    : unit.startsWith("mes") || unit.startsWith("month") ? 30 * 86_400_000
+    : 365 * 86_400_000;
+  return new Date(Date.now() - amount * unitMs).toISOString();
+}
+
+function parseDisplayedDate(value: unknown) {
+  const text = cleanText(value);
+  if (!text) return null;
+  const relative = parseRelativeDate(text);
+  if (relative) return relative;
+  const parsed = Date.parse(text);
+  if (!Number.isFinite(parsed) || parsed > Date.now() + 86_400_000) return null;
+  return new Date(parsed).toISOString();
+}
+
 export async function searchFacebookCommentSeeds(campaign: Campaign, apiKey: string) {
   if (!campaign.sources.includes("Facebook")) {
     return { results: [] as PublicSearchResult[], warnings: [] as string[], apiCalls: 0, queries: [] as string[] };
@@ -42,7 +68,7 @@ export async function searchFacebookCommentSeeds(campaign: Campaign, apiKey: str
     .slice(0, 900);
 
   try {
-    const params = new URLSearchParams({ q: query, start: "0" });
+    const params = new URLSearchParams({ q: query, start: "0", num: "20", tbs: "qdr:m,sbd:1" });
     if (normalize(campaign.location).includes("brasil")) {
       params.set("gl", "br");
       params.set("hl", "pt");
@@ -76,9 +102,11 @@ export async function searchFacebookCommentSeeds(campaign: Campaign, apiKey: str
 
       const title = cleanText(item.title);
       const snippet = cleanText(item.snippet);
+      const dateLabel = cleanText(item.date);
       const rawSource = cleanText(item.source);
       const displayedLink = cleanText(item.displayedLink);
-      const publicationText = [title, snippet].filter(Boolean).join(" — ");
+      const baseText = [title, snippet].filter(Boolean).join(" — ");
+      const publicationText = dateLabel ? `${baseText} — Data exibida pelo Google: ${dateLabel}` : baseText;
       if (!publicationText) continue;
 
       results.push({
@@ -86,11 +114,17 @@ export async function searchFacebookCommentSeeds(campaign: Campaign, apiKey: str
         profileName: rawSource || displayedLink || title || "Facebook",
         publicationUrl,
         publicationText,
-        publishedAt: null,
+        publishedAt: parseDisplayedDate(item.date),
       });
 
-      if (results.length >= 8) break;
+      if (results.length >= 12) break;
     }
+
+    results.sort((a, b) => {
+      const aTime = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
+      const bTime = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
+      return bTime - aTime;
+    });
 
     return { results, warnings: [] as string[], apiCalls: 1, queries: [query] };
   } catch (error) {
