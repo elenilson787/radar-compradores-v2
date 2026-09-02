@@ -77,25 +77,7 @@ function contextualText(comment: string, campaign: Campaign) {
   return `Comentário público em publicação sobre ${product}: ${comment.trim()}`;
 }
 
-export async function searchFacebookPublicComments(
-  campaign: Campaign,
-  apiKey: string,
-  seeds: PublicSearchResult[]
-): Promise<FacebookCommentSearch> {
-  if (!campaign.sources.includes("Facebook")) {
-    return { results: [], warnings: [], apiCalls: 0, pagesChecked: 0 };
-  }
-
-  const seed = seeds.find((item) => item.source === "Facebook" && isFacebookUrl(item.publicationUrl));
-  if (!seed) {
-    return {
-      results: [],
-      warnings: ["Facebook comentários: nenhuma publicação pública elegível foi encontrada nesta execução."],
-      apiCalls: 0,
-      pagesChecked: 0,
-    };
-  }
-
+async function scanFacebookSeed(seed: PublicSearchResult, campaign: Campaign, apiKey: string) {
   try {
     const response = await fetch("https://api.hasdata.com/scrape/web", {
       method: "POST",
@@ -123,17 +105,14 @@ export async function searchFacebookPublicComments(
 
     if (!response.ok) {
       return {
-        results: [],
-        warnings: [`Facebook comentários: página pública respondeu ${response.status}.`],
-        apiCalls: 1,
-        pagesChecked: 1,
+        results: [] as FacebookCommentResult[],
+        warning: `Facebook comentários: página pública respondeu ${response.status}.`,
       };
     }
 
     const data = await response.json() as { aiResponse?: { comments?: unknown[] } };
     const rawComments = Array.isArray(data.aiResponse?.comments) ? data.aiResponse?.comments ?? [] : [];
     const results: FacebookCommentResult[] = [];
-    const seen = new Set<string>();
 
     for (const raw of rawComments) {
       const parsed = parseComment(raw);
@@ -141,10 +120,6 @@ export async function searchFacebookPublicComments(
 
       const profileName = `Facebook · ${parsed.author}`;
       if (profileLooksLikeNonBuyer(profileName)) continue;
-
-      const key = `${normalize(parsed.author)}|${normalize(parsed.text)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
 
       results.push({
         source: "Facebook",
@@ -160,18 +135,69 @@ export async function searchFacebookPublicComments(
 
     return {
       results,
-      warnings: rawComments.length && !results.length
-        ? ["Facebook comentários: comentários estavam visíveis, mas nenhum tinha autoria segura + intenção de compra suficiente."]
-        : [],
-      apiCalls: 1,
-      pagesChecked: 1,
+      warning: rawComments.length && !results.length
+        ? "Facebook comentários: comentários estavam visíveis, mas nenhum tinha autoria segura + intenção de compra suficiente."
+        : "",
     };
   } catch (error) {
     return {
-      results: [],
-      warnings: [error instanceof Error ? `Facebook comentários: ${error.message}` : "Facebook comentários: falha ao ler a página pública."],
-      apiCalls: 1,
-      pagesChecked: 1,
+      results: [] as FacebookCommentResult[],
+      warning: error instanceof Error ? `Facebook comentários: ${error.message}` : "Facebook comentários: falha ao ler a página pública.",
     };
   }
+}
+
+export async function searchFacebookPublicComments(
+  campaign: Campaign,
+  apiKey: string,
+  seeds: PublicSearchResult[]
+): Promise<FacebookCommentSearch> {
+  if (!campaign.sources.includes("Facebook")) {
+    return { results: [], warnings: [], apiCalls: 0, pagesChecked: 0 };
+  }
+
+  const seenUrls = new Set<string>();
+  const eligibleSeeds = seeds.filter((item) => {
+    if (item.source !== "Facebook" || !isFacebookUrl(item.publicationUrl)) return false;
+    const key = item.publicationUrl.toLowerCase().replace(/[?#].*$/, "");
+    if (seenUrls.has(key)) return false;
+    seenUrls.add(key);
+    return true;
+  }).slice(0, 2);
+
+  if (!eligibleSeeds.length) {
+    return {
+      results: [],
+      warnings: ["Facebook comentários: nenhuma publicação pública elegível foi encontrada nesta execução."],
+      apiCalls: 0,
+      pagesChecked: 0,
+    };
+  }
+
+  const batches = await Promise.all(
+    eligibleSeeds.map((seed) => scanFacebookSeed(seed, campaign, apiKey))
+  );
+
+  const results: FacebookCommentResult[] = [];
+  const warnings: string[] = [];
+  const seenComments = new Set<string>();
+
+  for (const batch of batches) {
+    if (batch.warning) warnings.push(batch.warning);
+    for (const item of batch.results) {
+      const key = `${normalize(item.profileName)}|${normalize(item.publicationText)}`;
+      if (seenComments.has(key)) continue;
+      seenComments.add(key);
+      results.push(item);
+      if (results.length >= 20) break;
+    }
+    if (results.length >= 20) break;
+  }
+
+  return {
+    results,
+    warnings,
+    apiCalls: eligibleSeeds.length,
+    pagesChecked: eligibleSeeds.length,
+  };
 }
