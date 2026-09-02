@@ -23,6 +23,18 @@ const SITE_BY_SOURCE: Partial<Record<Source, string>> = {
 const DEFAULT_INTENT = ["quero comprar", "onde comprar", "alguém recomenda"];
 const AUTOMATIC_COMMERCIAL_EXCLUSIONS = ["promoção", "oferta", "cupom", "compre agora", "enquanto durarem os estoques"];
 const WEB_RETAIL_EXCLUSIONS = ["amazon.com.br", "mercadolivre.com.br", "shopee.com.br", "magazineluiza.com.br"];
+const NON_BUYER_PROFILE_PATTERNS = [
+  "loja", "store", "shop", "shopping", "oficial", "eletrodomesticos", "eletrodomésticos",
+  "magazine", "varejo", "revenda", "distribuidora", "fabricante", "receitas", "almanaque",
+  "portal", "blog", "revista", "canal", "dicas", "havan", "britania", "britânia", "elgin",
+  "philco", "mondial", "electrolux", "oster", "arno", "midea", "amazon", "mercado livre",
+  "shopee", "magalu", "magazine luiza", "casas bahia", "carrefour", "fast shop"
+];
+const ACCESSORY_PATTERNS = [
+  "borracha", "borrachas", "grelha", "grelhas", "cesto", "cestos", "grade", "grades",
+  "peça", "peca", "peças", "pecas", "acessório", "acessorio", "acessórios", "acessorios",
+  "resistência", "resistencia", "cabo", "cabos", "bandeja", "bandejas"
+];
 
 function quote(value: string) {
   return `"${value.replace(/"/g, "").trim()}"`;
@@ -30,6 +42,19 @@ function quote(value: string) {
 
 function normalize(value: string) {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function profileLooksLikeNonBuyer(profileName: string) {
+  const profile = normalize(profileName);
+  return NON_BUYER_PROFILE_PATTERNS.some((pattern) => profile.includes(normalize(pattern)));
+}
+
+function looksLikeAccessoryPurchase(text: string) {
+  const t = normalize(text);
+  const accessory = ACCESSORY_PATTERNS.map(normalize).join("|");
+  const purchase = "comprar|procurando|preciso de|onde encontro|onde comprar|quero comprar";
+  return new RegExp(`(?:${purchase}).{0,45}(?:${accessory})`).test(t)
+    || new RegExp(`(?:${accessory}).{0,45}(?:${purchase})`).test(t);
 }
 
 export function buildHasDataQueries(campaign: Campaign): PlannedQuery[] {
@@ -163,6 +188,8 @@ export async function searchHasData(campaign: Campaign, apiKey: string) {
         const baseText = [title, snippet].filter(Boolean).join(" — ");
         const publicationText = dateLabel ? `${baseText} — Data exibida pelo Google: ${dateLabel}` : baseText;
         if (!publicationUrl || !publicationText) return null;
+        if (profileLooksLikeNonBuyer(profileName)) return null;
+        if (looksLikeAccessoryPurchase(publicationText)) return null;
         const publishedAt = dateFromResult(result, publicationText);
         return { source, profileName, publicationUrl, publicationText, publishedAt } satisfies PublicSearchResult;
       }).filter((item): item is PublicSearchResult => Boolean(item));

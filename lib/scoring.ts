@@ -21,6 +21,18 @@ const CONVERSATIONAL_PATTERNS = [
   "alguém sabe", "alguem sabe", "alguém recomenda", "alguem recomenda", "vocês recomendam", "voces recomendam",
   "me recomendam", "manda link", "tem link"
 ];
+const NON_BUYER_PROFILE_PATTERNS = [
+  "loja", "store", "shop", "shopping", "oficial", "eletrodomesticos", "eletrodomésticos",
+  "magazine", "varejo", "revenda", "distribuidora", "fabricante", "receitas", "almanaque",
+  "portal", "blog", "revista", "canal", "dicas", "havan", "britania", "britânia", "elgin",
+  "philco", "mondial", "electrolux", "oster", "arno", "midea", "amazon", "mercado livre",
+  "shopee", "magalu", "magazine luiza", "casas bahia", "carrefour", "fast shop"
+];
+const ACCESSORY_PATTERNS = [
+  "borracha", "borrachas", "grelha", "grelhas", "cesto", "cestos", "grade", "grades",
+  "peça", "peca", "peças", "pecas", "acessório", "acessorio", "acessórios", "acessorios",
+  "resistência", "resistencia", "cabo", "cabos", "bandeja", "bandejas", "forma", "formas"
+];
 const URGENT_PATTERNS = ["hoje", "agora", "urgente", "preciso hoje", "comprar hoje"];
 
 function normalize(value: string) {
@@ -99,8 +111,17 @@ function recencyWeight(publishedAt?: string, text?: string) {
   return 20;
 }
 
-export function analyzeText(text: string, campaign?: Campaign, publishedAt?: string): Analysis {
+function accessoryPurchaseTarget(text: string) {
   const t = normalize(text);
+  const accessory = ACCESSORY_PATTERNS.map(normalize).join("|");
+  const purchase = "comprar|procurando|preciso de|onde encontro|onde comprar|quero comprar";
+  return new RegExp(`(?:${purchase}).{0,45}(?:${accessory})`).test(t)
+    || new RegExp(`(?:${accessory}).{0,45}(?:${purchase})`).test(t);
+}
+
+export function analyzeText(text: string, campaign?: Campaign, publishedAt?: string, profileName?: string): Analysis {
+  const t = normalize(text);
+  const profile = normalize(profileName ?? "");
   const signals: string[] = [];
   let intentScore = 15;
   const customBuyPatterns = campaign?.intentPhrases ?? [];
@@ -112,6 +133,8 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   const strongSellHit = STRONG_SELL_PATTERNS.find((p) => t.includes(normalize(p)));
   const commercialHits = COMMERCIAL_PATTERNS.filter((p) => t.includes(normalize(p)));
   const conversational = CONVERSATIONAL_PATTERNS.some((p) => t.includes(normalize(p)));
+  const profileLooksNonBuyer = Boolean(profile) && NON_BUYER_PROFILE_PATTERNS.some((p) => profile.includes(normalize(p)));
+  const accessoryTarget = accessoryPurchaseTarget(text);
   const clearlyCommercial = Boolean(strongSellHit) || commercialHits.length >= 2;
 
   if (strongHits.length) {
@@ -145,10 +168,20 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
     }
   }
 
+  if (profileLooksNonBuyer) {
+    intentScore -= 35;
+    signals.push("O perfil de origem parece ser marca, loja, mídia ou página temática; não identifica diretamente o comprador");
+  }
+
   const products = campaign?.products ?? [];
   const matchedProduct = products.find((p) => t.includes(normalize(p))) ?? null;
-  const relevance = products.length === 0 ? 100 : matchedProduct ? 100 : 25;
+  let relevance = products.length === 0 ? 100 : matchedProduct ? 100 : 25;
   if (matchedProduct) signals.push(`Produto da campanha identificado: ${matchedProduct}`);
+
+  if (accessoryTarget && matchedProduct) {
+    relevance = Math.min(relevance, 45);
+    signals.push("A intenção parece direcionada a peça ou acessório, não ao produto principal");
+  }
 
   if (campaign?.negativeKeywords.some((k) => t.includes(normalize(k)))) {
     intentScore -= 35;
@@ -161,14 +194,20 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   if (!publishedAt && !explicitTextDate) signals.push("Data da publicação não confirmada; recência recebeu peso neutro");
   if (explicitTextDate) signals.push("Data da publicação identificada no resultado público");
   const combined = Math.round(intentScore * 0.68 + relevance * 0.22 + recency * 0.10);
-  const score = clearlyCommercial && !strongHits.length && !conversational
-    ? Math.min(combined, 25)
-    : Math.max(0, Math.min(100, combined));
+
+  let score = Math.max(0, Math.min(100, combined));
+  if (profileLooksNonBuyer) score = Math.min(score, 40);
+  else if (accessoryTarget && matchedProduct) score = Math.min(score, 50);
+  else if (strongSellHit) score = Math.min(score, 35);
+  else if (clearlyCommercial && !strongHits.length && !conversational) score = Math.min(score, 25);
+
   const budget = extractBudget(text);
   if (budget) signals.push(`Orçamento em reais detectado: R$ ${budget.toLocaleString("pt-BR")}`);
 
   const urgency = URGENT_PATTERNS.some((p) => t.includes(normalize(p))) ? "alta" : /essa semana|em breve/.test(t) ? "média" : null;
-  const intent = clearlyCommercial && score < 55 ? "sell" : score >= 80 ? "buy" : score >= 55 ? "research" : "weak";
+  const intent = profileLooksNonBuyer || accessoryTarget || (clearlyCommercial && score < 55)
+    ? "weak"
+    : score >= 80 ? "buy" : score >= 55 ? "research" : "weak";
 
   return {
     score,

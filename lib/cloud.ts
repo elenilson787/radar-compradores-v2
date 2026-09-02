@@ -41,13 +41,14 @@ export async function loadCloudState(supabase: SupabaseClient): Promise<CloudSta
   const leads: Lead[] = (leadsResult.data ?? []).map((row) => {
     const campaign = campaignMap.get(row.campaign_id);
     const publishedAt = row.published_at || row.created_at;
-    const analysis = analyzeText(row.publication_text, campaign, publishedAt);
+    const profileName = row.profile_name || "Perfil público";
+    const analysis = analyzeText(row.publication_text, campaign, publishedAt, profileName);
 
     return {
       id: row.id,
       campaignId: row.campaign_id,
       source: row.source as Source,
-      profileName: row.profile_name || "Perfil público",
+      profileName,
       profileUrl: row.profile_url || undefined,
       publicationUrl: row.publication_url || "#",
       publicationText: row.publication_text,
