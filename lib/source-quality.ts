@@ -16,29 +16,34 @@ const GENERIC_SOCIAL_PROFILES = new Set([
   "resultado publico", "resultado público", "perfil publico", "perfil público"
 ]);
 
-const TRUSTED_COMMENT_PREFIX = "comentario publico em publicacao sobre";
-
 export function normalizeSourceText(value: string) {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 }
 
-export function isTrustedAttributedComment(publicationText: string) {
-  return normalizeSourceText(publicationText).startsWith(TRUSTED_COMMENT_PREFIX);
+function containsNonBuyerPattern(value: string) {
+  const normalized = normalizeSourceText(value);
+  return NON_BUYER_PROFILE_PATTERNS.some((pattern) => normalized.includes(normalizeSourceText(pattern)));
+}
+
+function structuredSocialAuthor(profileName: string) {
+  const profile = normalizeSourceText(profileName);
+  const match = profile.match(/^(facebook|instagram|tiktok|reddit)\s*[·|-]\s*(.+)$/);
+  if (!match?.[2]?.trim()) return null;
+  return { network: match[1], author: match[2].trim() };
 }
 
 export function profileLooksLikeNonBuyer(profileName: string) {
   const profile = normalizeSourceText(profileName);
   if (!profile) return true;
+  if (GENERIC_SOCIAL_PROFILES.has(profile)) return true;
 
-  // Structured comment leads are named like "Facebook · Maria". The network prefix
-  // alone is not a problem when a separate public author follows it.
-  const structuredCommentAuthor = profile.match(/^(facebook|instagram|tiktok|reddit)\s*[·|-]\s*(.+)$/);
-  if (structuredCommentAuthor?.[2]?.trim() && !GENERIC_SOCIAL_PROFILES.has(structuredCommentAuthor[2].trim())) {
-    return false;
+  const structured = structuredSocialAuthor(profileName);
+  if (structured) {
+    if (GENERIC_SOCIAL_PROFILES.has(structured.author)) return true;
+    return containsNonBuyerPattern(structured.author);
   }
 
-  if (GENERIC_SOCIAL_PROFILES.has(profile)) return true;
-  return NON_BUYER_PROFILE_PATTERNS.some((pattern) => profile.includes(normalizeSourceText(pattern)));
+  return containsNonBuyerPattern(profile);
 }
 
 function weakBand(): LeadBand {
@@ -46,7 +51,6 @@ function weakBand(): LeadBand {
 }
 
 export function applyAttributionGuard(analysis: Analysis, profileName: string, publicationText: string): Analysis {
-  if (isTrustedAttributedComment(publicationText)) return analysis;
   if (!profileLooksLikeNonBuyer(profileName)) return analysis;
 
   const score = Math.min(analysis.score, 40);
