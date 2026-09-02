@@ -72,9 +72,9 @@ function parseComment(item: unknown) {
   return { author: author.trim(), text: text.trim() };
 }
 
-function contextualText(comment: string, campaign: Campaign) {
+function contextualText(comment: string, campaign: Campaign, author: string) {
   const product = campaign.products.slice(0, 3).join(", ");
-  return `Comentário público em publicação sobre ${product}: ${comment.trim()}`;
+  return `Comentário público em publicação sobre ${product}. Usuário: ${author}. Comentário: ${comment.trim()}`;
 }
 
 async function scanFacebookSeed(seed: PublicSearchResult, campaign: Campaign, apiKey: string) {
@@ -95,7 +95,7 @@ async function scanFacebookSeed(seed: PublicSearchResult, campaign: Campaign, ap
         aiExtractRules: {
           comments: {
             type: "list",
-            description: "Extract only real comments that are visibly rendered to an unauthenticated visitor in the Facebook comments area. Each item must be COMMENT_AUTHOR|||EXACT_COMMENT_TEXT. The COMMENT_AUTHOR must be the person who wrote that comment, never the Page/post publisher. Ignore the post caption, Page name, Page replies, buttons, login banners, UI labels, suggested content and hidden comments. If a login banner is visible but some comments are still visible, return only those visible comments. Never infer or invent an author or comment. Maximum 20 items.",
+            description: "Extract only real comments that are visibly rendered to an unauthenticated visitor in the Facebook comments area. Each item must be COMMENT_AUTHOR|||EXACT_COMMENT_TEXT. The COMMENT_AUTHOR must be the person who wrote that comment, never the Page/post publisher. Ignore the post caption, Page name, Page replies, buttons, login banners, UI labels, suggested content and hidden comments. If a login banner is visible but some comments are still visible, return only those visible comments. Never infer or invent an author or comment. Prefer the newest visible comments when dates/order are available. Maximum 20 items.",
           },
         },
       }),
@@ -118,15 +118,14 @@ async function scanFacebookSeed(seed: PublicSearchResult, campaign: Campaign, ap
       const parsed = parseComment(raw);
       if (!parsed || !hasIntent(parsed.text)) continue;
 
-      const profileName = `Facebook · ${parsed.author}`;
-      if (profileLooksLikeNonBuyer(profileName)) continue;
+      if (profileLooksLikeNonBuyer(parsed.author)) continue;
 
       results.push({
         source: "Facebook",
-        profileName,
+        profileName: parsed.author,
         publicationUrl: seed.publicationUrl,
-        publicationText: contextualText(parsed.text, campaign),
-        publishedAt: null,
+        publicationText: contextualText(parsed.text, campaign, parsed.author),
+        publishedAt: seed.publishedAt,
         kind: "comment",
       });
 
@@ -157,13 +156,20 @@ export async function searchFacebookPublicComments(
   }
 
   const seenUrls = new Set<string>();
-  const eligibleSeeds = seeds.filter((item) => {
-    if (item.source !== "Facebook" || !isFacebookUrl(item.publicationUrl)) return false;
-    const key = item.publicationUrl.toLowerCase().replace(/[?#].*$/, "");
-    if (seenUrls.has(key)) return false;
-    seenUrls.add(key);
-    return true;
-  }).slice(0, 2);
+  const eligibleSeeds = seeds
+    .filter((item) => {
+      if (item.source !== "Facebook" || !isFacebookUrl(item.publicationUrl)) return false;
+      const key = item.publicationUrl.toLowerCase().replace(/[?#].*$/, "");
+      if (seenUrls.has(key)) return false;
+      seenUrls.add(key);
+      return true;
+    })
+    .sort((a, b) => {
+      const aTime = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
+      const bTime = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
+      return bTime - aTime;
+    })
+    .slice(0, 2);
 
   if (!eligibleSeeds.length) {
     return {
