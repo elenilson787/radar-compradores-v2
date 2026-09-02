@@ -1,4 +1,5 @@
 import type { Campaign, Source } from "./types";
+import { profileLooksLikeNonBuyer } from "./source-quality";
 
 export type PublicSearchResult = {
   source: Source;
@@ -26,15 +27,6 @@ const WEB_RETAIL_EXCLUSIONS = [
   "amazon.com.br", "mercadolivre.com.br", "shopee.com.br", "magazineluiza.com.br",
   "reclameaqui.com.br", "zoom.com.br", "buscape.com.br", "promobit.com.br", "pelando.com.br"
 ];
-const NON_BUYER_PROFILE_PATTERNS = [
-  "loja", "store", "shop", "shopping", "oficial", "eletrodomesticos", "eletrodomésticos",
-  "magazine", "varejo", "revenda", "distribuidora", "fabricante", "receitas", "almanaque",
-  "portal", "blog", "revista", "canal", "dicas", "achadinhos", "ofertas", "promoções", "promocoes",
-  "review", "reviews", "comparativo", "custo benefício", "custo beneficio", "rainha da", "rei da",
-  "reclame aqui", "havan", "britania", "britânia", "elgin", "philco", "mondial", "electrolux",
-  "oster", "arno", "midea", "amazon", "mercado livre", "shopee", "magalu", "magazine luiza",
-  "casas bahia", "carrefour", "fast shop"
-];
 const ACCESSORY_PATTERNS = [
   "borracha", "borrachas", "grelha", "grelhas", "cesto", "cestos", "grade", "grades",
   "peça", "peca", "peças", "pecas", "acessório", "acessorio", "acessórios", "acessorios",
@@ -54,11 +46,6 @@ function quote(value: string) {
 
 function normalize(value: string) {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-}
-
-function profileLooksLikeNonBuyer(profileName: string) {
-  const profile = normalize(profileName);
-  return NON_BUYER_PROFILE_PATTERNS.some((pattern) => profile.includes(normalize(pattern)));
 }
 
 function looksLikeAccessoryPurchase(text: string) {
