@@ -3,11 +3,19 @@ import { createClient } from "@supabase/supabase-js";
 import { searchHasData } from "@/lib/hasdata";
 import { searchPublicComments } from "@/lib/comments";
 import { searchFacebookPublicComments } from "@/lib/facebook-comments";
+import { searchFacebookCommentSeeds } from "@/lib/facebook-seeds";
 import { analyzeText } from "@/lib/scoring";
 import { applyAttributionGuard } from "@/lib/source-quality";
 import type { Campaign, Source } from "@/lib/types";
 
 const ALLOWED_SOURCES = new Set<Source>(["Facebook", "Instagram", "TikTok", "Reddit", "Web"]);
+const SOURCE_PRIORITY: Record<Source, number> = {
+  Facebook: 0,
+  Instagram: 1,
+  TikTok: 2,
+  Reddit: 3,
+  Web: 4,
+};
 
 function validCampaign(value: unknown): value is Campaign {
   if (!value || typeof value !== "object") return false;
@@ -45,6 +53,16 @@ async function authenticatedUser(request: NextRequest) {
   return data.user;
 }
 
+function dedupeSearchResults<T extends { source: Source; publicationUrl: string; profileName: string; publicationText: string }>(items: T[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = `${item.publicationUrl.toLowerCase().replace(/[?#].*$/, "")}|${item.profileName.toLowerCase()}|${item.publicationText.toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export async function POST(request: NextRequest) {
   const user = await authenticatedUser(request);
   if (!user) return NextResponse.json({ error: "Não autorizado." }, { status: 401 });
@@ -67,37 +85,64 @@ export async function POST(request: NextRequest) {
   }
 
   const startedAt = Date.now();
-  const publicationSearch = await searchHasData(campaign, apiKey);
 
-  // O coletor genérico continua responsável por Reddit/Instagram/TikTok.
-  // Facebook é tratado separadamente para garantir autoria do comentário.
-  const nonFacebookCampaign: Campaign = {
+  // Estratégia Facebook-first:
+  // 1) a busca principal usa Facebook + Instagram;
+  // 2) uma consulta extra encontra posts do Facebook adequados para ler comentários públicos;
+  // 3) TikTok/Reddit/Web só entram como fallback quando Facebook/Instagram retornam pouco material.
+  const primarySources = campaign.sources.filter((source) => source === "Facebook" || source === "Instagram");
+  const primaryCampaign: Campaign = {
     ...campaign,
-    sources: campaign.sources.filter((source) => source !== "Facebook"),
+    sources: primarySources.length ? primarySources : campaign.sources.slice(0, 2),
+  };
+
+  const [primarySearch, facebookSeedSearch] = await Promise.all([
+    searchHasData(primaryCampaign, apiKey),
+    searchFacebookCommentSeeds(campaign, apiKey),
+  ]);
+
+  const fallbackSources = campaign.sources
+    .filter((source) => source !== "Facebook" && source !== "Instagram")
+    .sort((a, b) => SOURCE_PRIORITY[a] - SOURCE_PRIORITY[b])
+    .slice(0, 2);
+
+  const shouldUseFallback = primarySearch.results.length < 8 && fallbackSources.length > 0;
+  const fallbackSearch = shouldUseFallback
+    ? await searchHasData({ ...campaign, sources: fallbackSources }, apiKey)
+    : { queries: [] as string[], results: [], warnings: [] as string[] };
+
+  const publicationResults = dedupeSearchResults([
+    ...primarySearch.results,
+    ...fallbackSearch.results,
+  ]).sort((a, b) => SOURCE_PRIORITY[a.source] - SOURCE_PRIORITY[b.source]);
+
+  const facebookSeeds = dedupeSearchResults([
+    ...facebookSeedSearch.results,
+    ...publicationResults.filter((item) => item.source === "Facebook"),
+  ]);
+
+  // Comentários fora do Facebook ficam concentrados no Instagram, que é a segunda prioridade.
+  const instagramCommentCampaign: Campaign = {
+    ...campaign,
+    sources: campaign.sources.includes("Instagram") ? ["Instagram"] : [],
   };
 
   const [commentSearch, facebookCommentSearch] = await Promise.all([
     searchPublicComments(
-      nonFacebookCampaign,
+      instagramCommentCampaign,
       apiKey,
-      publicationSearch.results.filter((item) => item.source !== "Facebook")
+      publicationResults.filter((item) => item.source === "Instagram")
     ),
-    searchFacebookPublicComments(campaign, apiKey, publicationSearch.results),
+    searchFacebookPublicComments(campaign, apiKey, facebookSeeds),
   ]);
 
   const combined = [
-    ...publicationSearch.results.map((item) => ({ ...item, kind: "publication" as const })),
-    ...commentSearch.results,
+    ...publicationResults.map((item) => ({ ...item, kind: "publication" as const })),
     ...facebookCommentSearch.results,
+    ...commentSearch.results,
   ];
 
-  const seen = new Set<string>();
-  const uniqueResults = combined.filter((item) => {
-    const key = `${item.source}|${item.publicationUrl.toLowerCase()}|${item.profileName.toLowerCase()}|${item.publicationText.toLowerCase()}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const uniqueResults = dedupeSearchResults(combined);
 
   const qualifiedResults = uniqueResults.filter((item) => {
     const rawAnalysis = analyzeText(
@@ -108,24 +153,32 @@ export async function POST(request: NextRequest) {
     );
     const analysis = applyAttributionGuard(rawAnalysis, item.profileName, item.publicationText);
     return analysis.score >= campaign.minimumScore;
-  });
+  }).sort((a, b) => SOURCE_PRIORITY[a.source] - SOURCE_PRIORITY[b.source]);
 
   const warnings = [
-    ...publicationSearch.warnings,
-    ...commentSearch.warnings,
+    ...primarySearch.warnings,
+    ...facebookSeedSearch.warnings,
+    ...fallbackSearch.warnings,
     ...facebookCommentSearch.warnings,
+    ...commentSearch.warnings,
   ];
-  const commentsFound = commentSearch.results.length + facebookCommentSearch.results.length;
-  const commentPagesChecked = commentSearch.pagesChecked + facebookCommentSearch.pagesChecked;
+  const commentsFound = facebookCommentSearch.results.length + commentSearch.results.length;
+  const commentPagesChecked = facebookCommentSearch.pagesChecked + commentSearch.pagesChecked;
 
   return NextResponse.json({
-    queryCount: publicationSearch.queries.length + commentSearch.apiCalls + facebookCommentSearch.apiCalls,
+    queryCount:
+      primarySearch.queries.length
+      + facebookSeedSearch.apiCalls
+      + fallbackSearch.queries.length
+      + facebookCommentSearch.apiCalls
+      + commentSearch.apiCalls,
     found: uniqueResults.length,
     qualified: qualifiedResults.length,
     commentsFound,
     commentPagesChecked,
     results: qualifiedResults,
     warnings,
+    sourceStrategy: "Facebook > Instagram > fallback",
     elapsedMs: Date.now() - startedAt,
   });
 }
