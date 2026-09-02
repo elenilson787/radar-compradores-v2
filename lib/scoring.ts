@@ -21,6 +21,13 @@ const CONVERSATIONAL_PATTERNS = [
   "alguém sabe", "alguem sabe", "alguém recomenda", "alguem recomenda", "vocês recomendam", "voces recomendam",
   "me recomendam", "manda link", "tem link"
 ];
+const DIRECT_COMMENT_BUY_PATTERNS = [
+  "eu quero", "quero um", "quero uma", "manda link", "manda o link", "me manda o link", "tem link",
+  "qual o link", "onde compra", "onde comprar", "onde acho", "onde encontro", "qual o preço", "qual o preco",
+  "qual o valor", "quanto custa", "preciso de um", "preciso de uma", "também quero", "tambem quero",
+  "eu preciso", "compraria"
+];
+const TRUSTED_PUBLIC_COMMENT_MARKER = "comentario publico em publicacao sobre";
 const NON_BUYER_PROFILE_PATTERNS = [
   "loja", "store", "shop", "shopping", "oficial", "eletrodomesticos", "eletrodomésticos",
   "magazine", "varejo", "revenda", "distribuidora", "fabricante", "receitas", "almanaque",
@@ -138,6 +145,8 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   const customBuyPatterns = campaign?.intentPhrases ?? [];
   const buyPatterns = [...new Set([...BUY_PATTERNS, ...customBuyPatterns])];
 
+  const trustedPublicComment = t.includes(TRUSTED_PUBLIC_COMMENT_MARKER);
+  const directCommentHit = trustedPublicComment && DIRECT_COMMENT_BUY_PATTERNS.some((p) => t.includes(normalize(p)));
   const hits = buyPatterns.filter((p) => t.includes(normalize(p)));
   const weakHits = hits.filter((p) => WEAK_BUY_PATTERNS.some((weak) => normalize(weak) === normalize(p)));
   const strongHits = hits.filter((p) => !weakHits.includes(p));
@@ -146,7 +155,7 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   const conversational = CONVERSATIONAL_PATTERNS.some((p) => t.includes(normalize(p)));
   const profileLooksNonBuyer = Boolean(profile) && NON_BUYER_PROFILE_PATTERNS.some((p) => profile.includes(normalize(p)));
   const accessoryTarget = accessoryPurchaseTarget(text);
-  const ambiguousIndexedComment = indexedCommentAttributionIsAmbiguous(text, [...buyPatterns, ...CONVERSATIONAL_PATTERNS]);
+  const ambiguousIndexedComment = !trustedPublicComment && indexedCommentAttributionIsAmbiguous(text, [...buyPatterns, ...CONVERSATIONAL_PATTERNS]);
   const clearlyCommercial = Boolean(strongSellHit) || commercialHits.length >= 2;
 
   if (strongHits.length) {
@@ -161,8 +170,12 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
     intentScore += 12;
     signals.push("Linguagem conversacional compatível com potencial comprador");
   }
+  if (directCommentHit) {
+    intentScore += 48;
+    signals.push("Comentário público curto demonstra intenção direta dentro de uma publicação sobre o produto");
+  }
   if (/\?|recomenda|melhor|vale a pena|preco|frete|link/.test(t)) {
-    intentScore += strongHits.length || conversational ? 10 : 5;
+    intentScore += strongHits.length || conversational || directCommentHit ? 10 : 5;
     signals.push("Pesquisa preço, recomendação, frete ou link");
   }
   if (URGENT_PATTERNS.some((p) => t.includes(normalize(p)))) {
@@ -171,7 +184,7 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   }
 
   if (clearlyCommercial) {
-    if (strongHits.length || conversational) {
+    if (strongHits.length || conversational || directCommentHit) {
       intentScore -= 30;
       signals.push("Conteúdo mistura sinal de comprador com linguagem comercial; score reduzido");
     } else {
@@ -217,7 +230,7 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   else if (ambiguousIndexedComment) score = Math.min(score, 45);
   else if (accessoryTarget && matchedProduct) score = Math.min(score, 50);
   else if (strongSellHit) score = Math.min(score, 35);
-  else if (clearlyCommercial && !strongHits.length && !conversational) score = Math.min(score, 25);
+  else if (clearlyCommercial && !strongHits.length && !conversational && !directCommentHit) score = Math.min(score, 25);
 
   const budget = extractBudget(text);
   if (budget) signals.push(`Orçamento em reais detectado: R$ ${budget.toLocaleString("pt-BR")}`);

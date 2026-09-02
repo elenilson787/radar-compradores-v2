@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { searchHasData } from "@/lib/hasdata";
+import { searchPublicComments } from "@/lib/comments";
 import { analyzeText } from "@/lib/scoring";
 import type { Campaign, Source } from "@/lib/types";
 
@@ -64,8 +65,23 @@ export async function POST(request: NextRequest) {
   }
 
   const startedAt = Date.now();
-  const result = await searchHasData(campaign, apiKey);
-  const qualifiedResults = result.results.filter((item) => {
+  const publicationSearch = await searchHasData(campaign, apiKey);
+  const commentSearch = await searchPublicComments(campaign, apiKey, publicationSearch.results);
+
+  const combined = [
+    ...publicationSearch.results.map((item) => ({ ...item, kind: "publication" as const })),
+    ...commentSearch.results,
+  ];
+
+  const seen = new Set<string>();
+  const uniqueResults = combined.filter((item) => {
+    const key = `${item.source}|${item.publicationUrl.toLowerCase()}|${item.profileName.toLowerCase()}|${item.publicationText.toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const qualifiedResults = uniqueResults.filter((item) => {
     const analysis = analyzeText(
       item.publicationText,
       campaign,
@@ -75,12 +91,15 @@ export async function POST(request: NextRequest) {
     return analysis.score >= campaign.minimumScore;
   });
 
+  const warnings = [...publicationSearch.warnings, ...commentSearch.warnings];
   return NextResponse.json({
-    queryCount: result.queries.length,
-    found: result.results.length,
+    queryCount: publicationSearch.queries.length + commentSearch.apiCalls,
+    found: uniqueResults.length,
     qualified: qualifiedResults.length,
+    commentsFound: commentSearch.results.length,
+    commentPagesChecked: commentSearch.pagesChecked,
     results: qualifiedResults,
-    warnings: result.warnings,
+    warnings,
     elapsedMs: Date.now() - startedAt,
   });
 }
