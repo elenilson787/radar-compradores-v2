@@ -1,17 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Analysis, Campaign, Lead, LeadBand, LeadStatus, SearchRun, Source } from "./types";
+import { analyzeText } from "./scoring";
+import type { Campaign, Lead, LeadStatus, SearchRun, Source } from "./types";
 
 type CloudState = {
   campaigns: Campaign[];
   leads: Lead[];
   runs: SearchRun[];
 };
-
-function bandFromScore(score: number): LeadBand {
-  if (score >= 80) return "Alta intenção";
-  if (score >= 55) return "Possível comprador";
-  return "Sinal fraco";
-}
 
 function runStatus(value: string): SearchRun["status"] {
   if (value === "running") return "Executando";
@@ -20,22 +15,14 @@ function runStatus(value: string): SearchRun["status"] {
 }
 
 export async function loadCloudState(supabase: SupabaseClient): Promise<CloudState> {
-  const [campaignsResult, leadsResult, signalsResult, runsResult] = await Promise.all([
+  const [campaignsResult, leadsResult, runsResult] = await Promise.all([
     supabase.from("campaigns").select("*").order("created_at", { ascending: true }),
     supabase.from("leads").select("*").order("created_at", { ascending: false }),
-    supabase.from("lead_signals").select("lead_id,signal,weight,reason"),
     supabase.from("search_runs").select("*").order("started_at", { ascending: false }).limit(100),
   ]);
 
-  for (const result of [campaignsResult, leadsResult, signalsResult, runsResult]) {
+  for (const result of [campaignsResult, leadsResult, runsResult]) {
     if (result.error) throw result.error;
-  }
-
-  const signalMap = new Map<string, string[]>();
-  for (const row of signalsResult.data ?? []) {
-    const list = signalMap.get(row.lead_id) ?? [];
-    list.push(row.signal);
-    signalMap.set(row.lead_id, list);
   }
 
   const campaigns: Campaign[] = (campaignsResult.data ?? []).map((row) => ({
@@ -50,20 +37,11 @@ export async function loadCloudState(supabase: SupabaseClient): Promise<CloudSta
     active: row.active,
   }));
 
+  const campaignMap = new Map(campaigns.map((campaign) => [campaign.id, campaign]));
   const leads: Lead[] = (leadsResult.data ?? []).map((row) => {
-    const score = row.score;
-    const analysis: Analysis = {
-      score,
-      band: bandFromScore(score),
-      intent: (row.intent ?? "weak") as Analysis["intent"],
-      product: row.product,
-      budget: row.budget == null ? null : Number(row.budget),
-      urgency: row.urgency as Analysis["urgency"],
-      relevance: row.relevance,
-      recencyWeight: row.recency_weight,
-      signals: signalMap.get(row.id) ?? [],
-      reason: "Classificação persistida no Supabase.",
-    };
+    const campaign = campaignMap.get(row.campaign_id);
+    const publishedAt = row.published_at || row.created_at;
+    const analysis = analyzeText(row.publication_text, campaign, publishedAt);
 
     return {
       id: row.id,
@@ -73,7 +51,7 @@ export async function loadCloudState(supabase: SupabaseClient): Promise<CloudSta
       profileUrl: row.profile_url || undefined,
       publicationUrl: row.publication_url || "#",
       publicationText: row.publication_text,
-      publishedAt: row.published_at || row.created_at,
+      publishedAt,
       createdAt: row.created_at,
       status: row.status as LeadStatus,
       analysis,
