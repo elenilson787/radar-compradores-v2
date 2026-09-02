@@ -157,9 +157,11 @@ export async function searchHasData(campaign: Campaign, apiKey: string) {
       return (data.organicResults ?? []).map((result) => {
         const title = cleanText(result.title);
         const snippet = cleanText(result.snippet);
+        const dateLabel = cleanText(result.date);
         const publicationUrl = cleanText(result.link);
         const profileName = cleanText(result.source) || cleanText(result.displayedLink) || title || "Resultado público";
-        const publicationText = [title, snippet].filter(Boolean).join(" — ");
+        const baseText = [title, snippet].filter(Boolean).join(" — ");
+        const publicationText = dateLabel ? `${baseText} — Data exibida pelo Google: ${dateLabel}` : baseText;
         if (!publicationUrl || !publicationText) return null;
         const publishedAt = dateFromResult(result, publicationText);
         return { source, profileName, publicationUrl, publicationText, publishedAt } satisfies PublicSearchResult;
