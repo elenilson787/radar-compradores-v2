@@ -50,7 +50,7 @@ function weakBand(): LeadBand {
   return "Sinal fraco";
 }
 
-export function applyAttributionGuard(analysis: Analysis, profileName: string, publicationText: string): Analysis {
+export function applyAttributionGuard(analysis: Analysis, profileName: string, _publicationText: string): Analysis {
   if (!profileLooksLikeNonBuyer(profileName)) return analysis;
 
   const score = Math.min(analysis.score, 40);
