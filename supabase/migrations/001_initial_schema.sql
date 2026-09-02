@@ -68,17 +68,39 @@ create table if not exists public.notes (
   created_at timestamptz not null default now()
 );
 
+create index if not exists idx_campaigns_user_id on public.campaigns(user_id);
+create index if not exists idx_search_runs_campaign_id on public.search_runs(campaign_id);
+create index if not exists idx_leads_campaign_id on public.leads(campaign_id);
+create index if not exists idx_leads_score on public.leads(score desc);
+create index if not exists idx_leads_status on public.leads(status);
+create index if not exists idx_lead_signals_lead_id on public.lead_signals(lead_id);
+create index if not exists idx_notes_lead_id on public.notes(lead_id);
+
 alter table public.campaigns enable row level security;
 alter table public.search_runs enable row level security;
 alter table public.leads enable row level security;
 alter table public.lead_signals enable row level security;
 alter table public.notes enable row level security;
 
-create policy "campaigns_owner" on public.campaigns for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
-create policy "runs_owner" on public.search_runs for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
-create policy "leads_owner" on public.leads for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "campaigns_owner" on public.campaigns;
+drop policy if exists "runs_owner" on public.search_runs;
+drop policy if exists "leads_owner" on public.leads;
+drop policy if exists "lead_signals_owner" on public.lead_signals;
+drop policy if exists "notes_owner" on public.notes;
+
+create policy "campaigns_owner" on public.campaigns
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create policy "runs_owner" on public.search_runs
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create policy "leads_owner" on public.leads
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 create policy "lead_signals_owner" on public.lead_signals
   for all
   using (exists (select 1 from public.leads l where l.id = lead_id and l.user_id = auth.uid()))
   with check (exists (select 1 from public.leads l where l.id = lead_id and l.user_id = auth.uid()));
-create policy "notes_owner" on public.notes for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create policy "notes_owner" on public.notes
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
