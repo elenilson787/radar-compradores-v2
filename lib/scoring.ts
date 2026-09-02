@@ -51,6 +51,10 @@ function normalize(value: string) {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function band(score: number): LeadBand {
   if (score >= 80) return "Alta intenção";
   if (score >= 55) return "Possível comprador";
@@ -120,6 +124,26 @@ function accessoryPurchaseTarget(text: string) {
   const purchase = "comprar|procurando|preciso de|onde encontro|onde comprar|quero comprar";
   return new RegExp(`(?:${purchase}).{0,45}(?:${accessory})`).test(t)
     || new RegExp(`(?:${accessory}).{0,45}(?:${purchase})`).test(t);
+}
+
+function differentPurchaseTargetAfterOwnership(text: string, matchedProduct: string | null) {
+  if (!matchedProduct) return false;
+  const t = normalize(text);
+  const product = normalize(matchedProduct);
+  const productPattern = escapeRegExp(product).replace(/\\\s+/g, "\\s+");
+  const ownership = new RegExp(`(?:ja tenho|eu tenho|tenho (?:um|uma))[^.!?]{0,70}${productPattern}`);
+  if (!ownership.test(t)) return false;
+
+  const purchasePattern = /(quero comprar|preciso comprar|vou comprar|estou procurando|onde comprar)/g;
+  for (const match of t.matchAll(purchasePattern)) {
+    const index = match.index ?? -1;
+    if (index < 0) continue;
+    const after = t.slice(index, index + 100);
+    if (after.includes(product)) continue;
+    const before = t.slice(Math.max(0, index - 100), index);
+    if (before.includes(product) && /(ja tenho|eu tenho|tenho um|tenho uma)/.test(before)) return true;
+  }
+  return false;
 }
 
 function indexedCommentAttributionIsAmbiguous(text: string, patterns: string[]) {
@@ -205,12 +229,19 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
 
   const products = campaign?.products ?? [];
   const matchedProduct = products.find((p) => t.includes(normalize(p))) ?? null;
+  const wrongPurchaseTarget = differentPurchaseTargetAfterOwnership(text, matchedProduct);
   let relevance = products.length === 0 ? 100 : matchedProduct ? 100 : 25;
   if (matchedProduct) signals.push(`Produto da campanha identificado: ${matchedProduct}`);
 
   if (accessoryTarget && matchedProduct) {
     relevance = Math.min(relevance, 45);
     signals.push("A intenção parece direcionada a peça ou acessório, não ao produto principal");
+  }
+
+  if (wrongPurchaseTarget && matchedProduct) {
+    relevance = Math.min(relevance, 35);
+    intentScore -= 30;
+    signals.push("O texto indica que a pessoa já possui o produto da campanha e a compra mencionada parece ser de outro item");
   }
 
   if (campaign?.negativeKeywords.some((k) => t.includes(normalize(k)))) {
@@ -228,6 +259,7 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   let score = Math.max(0, Math.min(100, combined));
   if (profileLooksNonBuyer) score = Math.min(score, 40);
   else if (ambiguousIndexedComment) score = Math.min(score, 45);
+  else if (wrongPurchaseTarget && matchedProduct) score = Math.min(score, 45);
   else if (accessoryTarget && matchedProduct) score = Math.min(score, 50);
   else if (strongSellHit) score = Math.min(score, 35);
   else if (clearlyCommercial && !strongHits.length && !conversational && !directCommentHit) score = Math.min(score, 25);
@@ -236,7 +268,7 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   if (budget) signals.push(`Orçamento em reais detectado: R$ ${budget.toLocaleString("pt-BR")}`);
 
   const urgency = URGENT_PATTERNS.some((p) => t.includes(normalize(p))) ? "alta" : /essa semana|em breve/.test(t) ? "média" : null;
-  const intent = profileLooksNonBuyer || ambiguousIndexedComment || accessoryTarget || (clearlyCommercial && score < 55)
+  const intent = profileLooksNonBuyer || ambiguousIndexedComment || wrongPurchaseTarget || accessoryTarget || (clearlyCommercial && score < 55)
     ? "weak"
     : score >= 80 ? "buy" : score >= 55 ? "research" : "weak";
 
