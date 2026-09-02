@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { searchHasData } from "@/lib/hasdata";
 import { searchPublicComments } from "@/lib/comments";
 import { analyzeText } from "@/lib/scoring";
+import { applyAttributionGuard } from "@/lib/source-quality";
 import type { Campaign, Source } from "@/lib/types";
 
 const ALLOWED_SOURCES = new Set<Source>(["Facebook", "Instagram", "TikTok", "Reddit", "Web"]);
@@ -82,12 +83,13 @@ export async function POST(request: NextRequest) {
   });
 
   const qualifiedResults = uniqueResults.filter((item) => {
-    const analysis = analyzeText(
+    const rawAnalysis = analyzeText(
       item.publicationText,
       campaign,
       item.publishedAt ?? undefined,
       item.profileName
     );
+    const analysis = applyAttributionGuard(rawAnalysis, item.profileName, item.publicationText);
     return analysis.score >= campaign.minimumScore;
   });
 

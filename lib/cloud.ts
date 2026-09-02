@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { analyzeText } from "./scoring";
+import { applyAttributionGuard } from "./source-quality";
 import type { Campaign, Lead, LeadStatus, SearchRun, Source } from "./types";
 
 type CloudState = {
@@ -42,7 +43,8 @@ export async function loadCloudState(supabase: SupabaseClient): Promise<CloudSta
     const campaign = campaignMap.get(row.campaign_id);
     const publishedAt = row.published_at || row.created_at;
     const profileName = row.profile_name || "Perfil público";
-    const analysis = analyzeText(row.publication_text, campaign, publishedAt, profileName);
+    const rawAnalysis = analyzeText(row.publication_text, campaign, publishedAt, profileName);
+    const analysis = applyAttributionGuard(rawAnalysis, profileName, row.publication_text);
 
     return {
       id: row.id,
