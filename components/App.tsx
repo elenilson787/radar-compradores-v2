@@ -5,10 +5,25 @@ import { Activity, Check, ChevronRight, CircleDot, ExternalLink, Flame, History,
 import { analyzeText } from "@/lib/scoring";
 import { createFingerprint } from "@/lib/dedupe";
 import { initialCampaigns, initialLeads, initialRuns } from "@/lib/seed";
+import { getSupabaseBrowserClient } from "@/lib/supabase";
 import { Campaign, Lead, LeadStatus, SearchRun, Source } from "@/lib/types";
 
 type Tab = "radar" | "campaigns" | "analyze" | "runs" | "integrations";
 const STORE = "radar-compradores-v2-state";
+
+type SearchApiResult = {
+  queryCount?: number;
+  found?: number;
+  elapsedMs?: number;
+  warnings?: string[];
+  error?: string;
+  results?: Array<{
+    source: Source;
+    profileName: string;
+    publicationUrl: string;
+    publicationText: string;
+  }>;
+};
 
 function scoreClass(score: number) { return score >= 80 ? "score score-hot" : score >= 55 ? "score score-warm" : "score score-cold"; }
 function relativeDate(iso: string) {
@@ -18,31 +33,76 @@ function relativeDate(iso: string) {
   return `há ${Math.round(h / 24)} d`;
 }
 
+function dbRunStatus(value: string): SearchRun["status"] {
+  if (value === "running") return "Executando";
+  if (value === "failed") return "Falhou";
+  return "Concluída";
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("radar");
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns);
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
-  const [runs] = useState<SearchRun[]>(initialRuns);
+  const [runs, setRuns] = useState<SearchRun[]>(initialRuns);
   const [hydrated, setHydrated] = useState(false);
-  const [campaignId, setCampaignId] = useState(initialCampaigns[0].id);
+  const [campaignId, setCampaignId] = useState(initialCampaigns[0]?.id ?? "");
   const [statusFilter, setStatusFilter] = useState<"Todos" | LeadStatus>("Todos");
   const [sourceFilter, setSourceFilter] = useState<"Todas" | Source>("Todas");
   const [scoreFilter, setScoreFilter] = useState("0");
   const [query, setQuery] = useState("");
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchNotice, setSearchNotice] = useState("");
   const [form, setForm] = useState({ source: "Facebook" as Source, profileName: "", publicationUrl: "", publicationText: "", publishedAt: new Date().toISOString().slice(0,16) });
   const [campaignForm, setCampaignForm] = useState({ name: "", location: "Brasil", products: "", intent: "", negative: "", minimumScore: 55 });
 
   useEffect(() => {
     const raw = localStorage.getItem(STORE);
     if (raw) {
-      try { const parsed = JSON.parse(raw); setCampaigns(parsed.campaigns ?? initialCampaigns); setLeads(parsed.leads ?? initialLeads); } catch {}
+      try {
+        const parsed = JSON.parse(raw);
+        setCampaigns(parsed.campaigns ?? initialCampaigns);
+        setLeads(parsed.leads ?? initialLeads);
+        setRuns(parsed.runs ?? initialRuns);
+        const firstCampaign = (parsed.campaigns ?? initialCampaigns)?.[0];
+        if (firstCampaign?.id) setCampaignId(firstCampaign.id);
+      } catch {}
     }
     setHydrated(true);
   }, []);
+
   useEffect(() => {
-    if (hydrated) localStorage.setItem(STORE, JSON.stringify({ campaigns, leads }));
-  }, [campaigns, leads, hydrated]);
+    if (hydrated) localStorage.setItem(STORE, JSON.stringify({ campaigns, leads, runs }));
+  }, [campaigns, leads, runs, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) return;
+    let active = true;
+
+    (async () => {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (!sessionData.session || !active) return;
+      const { data, error } = await supabase
+        .from("search_runs")
+        .select("id,campaign_id,started_at,query_count,results_found,results_saved,status")
+        .order("started_at", { ascending: false })
+        .limit(50);
+      if (error || !active) return;
+      setRuns((data ?? []).map((row) => ({
+        id: row.id,
+        campaignId: row.campaign_id,
+        startedAt: row.started_at,
+        queries: row.query_count,
+        found: row.results_found,
+        saved: row.results_saved,
+        status: dbRunStatus(row.status),
+      })));
+    })();
+
+    return () => { active = false; };
+  }, [hydrated]);
 
   const currentCampaign = campaigns.find(c => c.id === campaignId) ?? campaigns[0];
   const filtered = useMemo(() => leads.filter(l => {
@@ -79,6 +139,107 @@ export default function App() {
     setLeads(old => [lead, ...old]); setSelectedLead(lead); setTab("radar");
   }
 
+  async function runPublicSearch() {
+    if (searching) return;
+    if (!currentCampaign) {
+      setSearchNotice("Crie uma campanha antes de executar a busca pública.");
+      setTab("campaigns");
+      return;
+    }
+
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) {
+      setSearchNotice("Supabase não está configurado neste ambiente.");
+      return;
+    }
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const session = sessionData.session;
+    if (!session) {
+      setSearchNotice("Sua sessão expirou. Entre novamente para buscar.");
+      return;
+    }
+
+    setSearching(true);
+    setSearchNotice("Buscando resultados públicos e classificando oportunidades...");
+    const startedAt = new Date().toISOString();
+
+    try {
+      const response = await fetch("/api/search", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ campaign: currentCampaign }),
+      });
+      const payload = await response.json() as SearchApiResult;
+      if (!response.ok) throw new Error(payload.error || `Falha na busca (${response.status}).`);
+
+      const known = new Set(leads.map((lead) => lead.fingerprint));
+      const foundAt = new Date().toISOString();
+      const imported: Lead[] = [];
+
+      for (const result of payload.results ?? []) {
+        const fingerprint = createFingerprint(result.source, result.publicationUrl, result.publicationText);
+        if (known.has(fingerprint)) continue;
+        const analysis = analyzeText(result.publicationText, currentCampaign);
+        if (analysis.score < currentCampaign.minimumScore) continue;
+        known.add(fingerprint);
+        imported.push({
+          id: crypto.randomUUID(),
+          campaignId: currentCampaign.id,
+          source: result.source,
+          profileName: result.profileName || "Resultado público",
+          publicationUrl: result.publicationUrl,
+          publicationText: result.publicationText,
+          publishedAt: foundAt,
+          createdAt: foundAt,
+          status: "Novo",
+          analysis,
+          fingerprint,
+        });
+      }
+
+      if (imported.length) setLeads(old => [...imported, ...old]);
+
+      const runId = crypto.randomUUID();
+      const run: SearchRun = {
+        id: runId,
+        campaignId: currentCampaign.id,
+        startedAt,
+        queries: payload.queryCount ?? 0,
+        found: payload.found ?? 0,
+        saved: imported.length,
+        status: "Concluída",
+      };
+      setRuns(old => [run, ...old].slice(0, 50));
+
+      const { error: runError } = await supabase.from("search_runs").insert({
+        id: runId,
+        user_id: session.user.id,
+        campaign_id: currentCampaign.id,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        query_count: payload.queryCount ?? 0,
+        results_found: payload.found ?? 0,
+        results_saved: imported.length,
+        status: "completed",
+        error: payload.warnings?.length ? payload.warnings.join(" | ").slice(0, 3000) : null,
+      });
+
+      const warningText = payload.warnings?.length ? ` ${payload.warnings.length} fonte(s) retornaram aviso.` : "";
+      const historyText = runError ? " O Radar funcionou, mas o histórico não pôde ser gravado." : "";
+      setSearchNotice(`Busca concluída: ${payload.found ?? 0} resultados brutos, ${imported.length} oportunidades salvas.${warningText}${historyText}`);
+      setTab("radar");
+    } catch (error) {
+      setSearchNotice(error instanceof Error ? error.message : "Falha ao executar a busca pública.");
+      setTab("integrations");
+    } finally {
+      setSearching(false);
+    }
+  }
+
   function deleteCampaign(id: string) {
     if (campaigns.length <= 1) return;
     const nextCampaigns = campaigns.filter(c => c.id !== id);
@@ -103,7 +264,7 @@ export default function App() {
   return <main>
     <header className="topbar"><div className="brand"><div className="logo"><Target size={20}/></div><div><span>INTENÇÃO PÚBLICA</span><strong>Radar de Compradores <b>V2</b></strong></div></div><button className="btn primary" onClick={()=>setTab("campaigns")}><Plus size={17}/> Nova campanha</button></header>
     <div className="wrap">
-      <section className="hero"><div><div className="eyebrow"><Activity size={16}/> MONITORAMENTO PESSOAL</div><h1>Encontre quem já demonstrou vontade de comprar.</h1><p>Priorize sinais públicos de compra, entenda por que foram classificados e revise pessoalmente cada oportunidade.</p></div><div className="hero-actions"><select value={campaignId} onChange={e=>setCampaignId(e.target.value)}>{campaigns.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><button className="btn lime" onClick={()=>setTab("integrations")}><Search size={17}/> Buscar agora</button></div></section>
+      <section className="hero"><div><div className="eyebrow"><Activity size={16}/> MONITORAMENTO PESSOAL</div><h1>Encontre quem já demonstrou vontade de comprar.</h1><p>Priorize sinais públicos de compra, entenda por que foram classificados e revise pessoalmente cada oportunidade.</p></div><div className="hero-actions"><select value={campaignId} onChange={e=>setCampaignId(e.target.value)}>{campaigns.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><button className="btn lime" disabled={searching || !currentCampaign} onClick={runPublicSearch}><Search size={17}/> {searching ? "Buscando..." : "Buscar agora"}</button></div></section>
       <nav className="tabs">
         <button className={tab==="radar"?"active":""} onClick={()=>setTab("radar")}><Target size={16}/>Radar</button>
         <button className={tab==="campaigns"?"active":""} onClick={()=>setTab("campaigns")}><Megaphone size={16}/>Campanhas</button>
@@ -111,6 +272,8 @@ export default function App() {
         <button className={tab==="runs"?"active":""} onClick={()=>setTab("runs")}><History size={16}/>Execuções</button>
         <button className={tab==="integrations"?"active":""} onClick={()=>setTab("integrations")}><Settings2 size={16}/>Integrações</button>
       </nav>
+
+      {searchNotice && <div className="notice"><Search size={18}/><div><strong>Busca pública</strong><p>{searchNotice}</p></div></div>}
 
       {tab === "radar" && <>
         <section className="metrics"><Metric label="Candidatos encontrados" value={metrics.total} icon={<CircleDot/>}/><Metric label="Intenção alta" value={metrics.hot} icon={<Flame/>}/><Metric label="Aguardando revisão" value={metrics.review} icon={<Sparkles/>}/><Metric label="Convertidos" value={metrics.converted} icon={<Check/>}/></section>
@@ -125,9 +288,9 @@ export default function App() {
 
       {tab === "analyze" && <section className="two-cols"><div className="panel"><h2>Analisar uma publicação pública</h2><p>Cole o conteúdo encontrado. A V2 calcula intenção, relevância e recência e evita duplicatas.</p><div className="form-grid"><label>Rede social<select value={form.source} onChange={e=>setForm({...form,source:e.target.value as Source})}>{["Facebook","Instagram","TikTok","Reddit","Web"].map(x=><option key={x}>{x}</option>)}</select></label><label>Nome público do perfil<input placeholder="Ex.: Maria S." value={form.profileName} onChange={e=>setForm({...form,profileName:e.target.value})}/></label></div><label>Link da publicação<input placeholder="https://..." value={form.publicationUrl} onChange={e=>setForm({...form,publicationUrl:e.target.value})}/></label><label>Data/hora da publicação<input type="datetime-local" value={form.publishedAt} onChange={e=>setForm({...form,publishedAt:e.target.value})}/></label><label>Texto da publicação ou comentário<textarea className="big" placeholder="Ex.: Alguém sabe onde comprar uma air fryer boa e barata?" value={form.publicationText} onChange={e=>setForm({...form,publicationText:e.target.value})}/></label><button className="btn primary" onClick={saveAnalysis}><Sparkles size={16}/>Analisar e salvar</button></div><ScoringHelp/></section>}
 
-      {tab === "runs" && <section className="panel"><h2>Execuções</h2><p>Histórico de buscas automáticas. Será preenchido na Fase 2.</p><div className="run-table"><div className="run row-head"><span>Data</span><span>Campanha</span><span>Consultas</span><span>Encontrados</span><span>Salvos</span><span>Status</span></div>{runs.map(r=><div className="run" key={r.id}><span>{new Date(r.startedAt).toLocaleString("pt-BR")}</span><span>{campaigns.find(c=>c.id===r.campaignId)?.name}</span><span>{r.queries}</span><span>{r.found}</span><span>{r.saved}</span><span className="badge">{r.status}</span></div>)}</div></section>}
+      {tab === "runs" && <section className="panel"><h2>Execuções</h2><p>Histórico das buscas públicas executadas para suas campanhas.</p><div className="run-table"><div className="run row-head"><span>Data</span><span>Campanha</span><span>Consultas</span><span>Encontrados</span><span>Salvos</span><span>Status</span></div>{runs.length===0?<div className="empty">Nenhuma busca automática executada ainda.</div>:runs.map(r=><div className="run" key={r.id}><span>{new Date(r.startedAt).toLocaleString("pt-BR")}</span><span>{campaigns.find(c=>c.id===r.campaignId)?.name ?? "Campanha removida"}</span><span>{r.queries}</span><span>{r.found}</span><span>{r.saved}</span><span className="badge">{r.status}</span></div>)}</div></section>}
 
-      {tab === "integrations" && <section><div className="notice"><Check size={18}/><div><strong>Uso pessoal e revisão humana</strong><p>A ferramenta organiza conteúdo público. Nenhuma mensagem é enviada e ninguém é incluído em grupos automaticamente.</p></div></div><div className="integration-grid"><Integration title="Busca pública" state="Preparada" text="HasData / Google. A API será conectada na Fase 2 e alimentará o histórico de execuções."/><Integration title="Página do Facebook" state="Próxima etapa" text="Somente conteúdo e permissões autorizadas pela Meta."/><Integration title="Importação manual" state="Ativa" text="Cole qualquer publicação pública encontrada e use agora o classificador V2."/></div></section>}
+      {tab === "integrations" && <section><div className="notice"><Check size={18}/><div><strong>Uso pessoal e revisão humana</strong><p>A ferramenta organiza conteúdo público. Nenhuma mensagem é enviada e ninguém é incluído em grupos automaticamente.</p></div></div><div className="integration-grid"><Integration title="Busca pública" state="Servidor pronto" text="HasData / Google SERP. A chave fica somente na Vercel e o botão Buscar agora usa a campanha selecionada."/><Integration title="Página do Facebook" state="Próxima etapa" text="Somente conteúdo e permissões autorizadas pela Meta."/><Integration title="Importação manual" state="Ativa" text="Cole qualquer publicação pública encontrada e use agora o classificador V2."/></div></section>}
     </div>
     {selectedLead && <div className="modal-backdrop" onClick={()=>setSelectedLead(null)}><aside className="drawer" onClick={e=>e.stopPropagation()}><button className="close" onClick={()=>setSelectedLead(null)}>×</button><div className={scoreClass(selectedLead.analysis.score)}>{selectedLead.analysis.score}</div><h2>{selectedLead.analysis.band}</h2><p className="muted">{selectedLead.source} · {relativeDate(selectedLead.publishedAt)}</p><blockquote>{selectedLead.publicationText}</blockquote><h3>Por que foi classificado?</h3><ul>{selectedLead.analysis.signals.map(s=><li key={s}><Check size={15}/>{s}</li>)}</ul><div className="detail-grid"><div><span>Relevância</span><b>{selectedLead.analysis.relevance}%</b></div><div><span>Recência</span><b>{selectedLead.analysis.recencyWeight}%</b></div><div><span>Produto</span><b>{selectedLead.analysis.product??"—"}</b></div><div><span>Urgência</span><b>{selectedLead.analysis.urgency??"—"}</b></div></div><label>Situação<select value={selectedLead.status} onChange={e=>updateStatus(selectedLead.id,e.target.value as LeadStatus)}>{["Novo","Revisado","Contatado","Convertido","Descartado"].map(s=><option key={s}>{s}</option>)}</select></label>{selectedLead.publicationUrl!=="#"&&<a className="btn primary link" href={selectedLead.publicationUrl} target="_blank" rel="noreferrer">Abrir publicação <ExternalLink size={16}/></a>}</aside></div>}
   </main>
