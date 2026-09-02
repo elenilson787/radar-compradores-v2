@@ -60,8 +60,12 @@ export default function CloudGate() {
     };
   }, [supabase]);
 
+  // Recarrega o estado do banco apenas quando o usuário autenticado muda.
+  // Renovação de token/retorno ao foco atualiza `session`, mas não desmonta o Radar.
+  const sessionUserId = session?.user.id ?? null;
+
   useEffect(() => {
-    if (!supabase || !session) return;
+    if (!supabase || !sessionUserId) return;
 
     let cancelled = false;
     setDataReady(false);
@@ -86,10 +90,10 @@ export default function CloudGate() {
     return () => {
       cancelled = true;
     };
-  }, [supabase, session]);
+  }, [supabase, sessionUserId]);
 
   useEffect(() => {
-    if (!supabase || !session || !dataReady) return;
+    if (!supabase || !sessionUserId || !dataReady) return;
 
     const timer = window.setInterval(async () => {
       if (saving.current) return;
@@ -111,7 +115,7 @@ export default function CloudGate() {
     }, 1200);
 
     return () => window.clearInterval(timer);
-  }, [supabase, session, dataReady]);
+  }, [supabase, sessionUserId, dataReady]);
 
   async function signIn(event: FormEvent) {
     event.preventDefault();
