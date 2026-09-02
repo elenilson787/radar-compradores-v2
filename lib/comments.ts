@@ -39,7 +39,10 @@ const COMMENT_INTENT_PATTERNS = [
 ];
 
 const BOT_NAMES = ["automoderator", "bot", "moderatorbot"];
-const SOCIAL_SOURCES = new Set<Source>(["Facebook", "Instagram", "TikTok"]);
+// Facebook pages observed in production require authentication for the actual post/comment view.
+// HasData explicitly does not bypass login walls, so Facebook comment scraping stays disabled
+// until we add an authorized Meta Page integration. Instagram/TikTok remain best-effort beta.
+const SOCIAL_SOURCES = new Set<Source>(["Instagram", "TikTok"]);
 
 function normalize(value: string) {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -79,10 +82,10 @@ function contextualCommentText(comment: string, campaign: Campaign) {
 
 async function discoverCommentSeedUrls(campaign: Campaign, apiKey: string) {
   const sites = campaign.sources
-    .filter((source) => source !== "Web")
-    .map((source) => source === "Facebook" ? "facebook.com" : source === "Instagram" ? "instagram.com" : source === "TikTok" ? "tiktok.com" : "reddit.com");
+    .filter((source) => source !== "Web" && source !== "Facebook")
+    .map((source) => source === "Instagram" ? "instagram.com" : source === "TikTok" ? "tiktok.com" : "reddit.com");
 
-  if (!sites.length) return { urls: [] as string[], warning: "" };
+  if (!sites.length) return { urls: [] as string[], warning: "", apiCalls: 0 };
 
   const products = campaign.products.slice(0, 3).map(quote);
   const productExpr = products.length === 1 ? products[0] : `(${products.join(" OR ")})`;
@@ -100,21 +103,21 @@ async function discoverCommentSeedUrls(campaign: Campaign, apiKey: string) {
       cache: "no-store",
       signal: AbortSignal.timeout(25_000),
     });
-    if (!response.ok) return { urls: [] as string[], warning: `Busca de publicações para comentários respondeu ${response.status}.` };
+    if (!response.ok) return { urls: [] as string[], warning: `Busca de publicações para comentários respondeu ${response.status}.`, apiCalls: 1 };
     const data = await response.json() as { organicResults?: Array<Record<string, unknown>> };
     const seen = new Set<string>();
     const urls: string[] = [];
     for (const item of data.organicResults ?? []) {
       const link = typeof item.link === "string" ? item.link : "";
       const source = sourceFromUrl(link);
-      if (!link || !source || !campaign.sources.includes(source) || seen.has(link)) continue;
+      if (!link || !source || source === "Facebook" || !campaign.sources.includes(source) || seen.has(link)) continue;
       seen.add(link);
       urls.push(link);
       if (urls.length >= 10) break;
     }
-    return { urls, warning: "" };
+    return { urls, warning: "", apiCalls: 1 };
   } catch (error) {
-    return { urls: [] as string[], warning: error instanceof Error ? `Busca de comentários: ${error.message}` : "Falha ao localizar publicações para comentários." };
+    return { urls: [] as string[], warning: error instanceof Error ? `Busca de comentários: ${error.message}` : "Falha ao localizar publicações para comentários.", apiCalls: 1 };
   }
 }
 
@@ -252,6 +255,10 @@ export async function searchPublicComments(
   existingSeeds: PublicSearchResult[] = []
 ): Promise<SearchSummary> {
   const warnings: string[] = [];
+  if (campaign.sources.includes("Facebook")) {
+    warnings.push("Facebook comentários: varredura pública desativada porque as páginas testadas exigem login; use integração Meta autorizada para comentários.");
+  }
+
   const seedDiscovery = await discoverCommentSeedUrls(campaign, apiKey);
   if (seedDiscovery.warning) warnings.push(seedDiscovery.warning);
 
@@ -273,7 +280,7 @@ export async function searchPublicComments(
     if (!source || !SOCIAL_SOURCES.has(source) || usedSocialSources.has(source)) continue;
     usedSocialSources.add(source);
     socialSeeds.push({ url, source });
-    if (socialSeeds.length >= 3) break;
+    if (socialSeeds.length >= 2) break;
   }
 
   const redditBatches = await Promise.all(redditSeeds.map((url) => scanRedditThread(url, campaign)));
@@ -297,7 +304,7 @@ export async function searchPublicComments(
   return {
     results,
     warnings,
-    apiCalls: 1 + socialSeeds.length,
+    apiCalls: seedDiscovery.apiCalls + socialSeeds.length,
     pagesChecked: redditSeeds.length + socialSeeds.length,
   };
 }
