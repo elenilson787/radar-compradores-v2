@@ -3,9 +3,24 @@ import { Analysis, Campaign, LeadBand } from "./types";
 const BUY_PATTERNS = [
   "quero comprar", "onde comprar", "onde consigo", "alguém recomenda", "alguem recomenda",
   "manda link", "tem link", "qual comprar", "qual é melhor", "qual e melhor", "quanto custa",
-  "onde está barato", "onde esta barato", "estou procurando", "preciso comprar", "vou comprar"
+  "onde está barato", "onde esta barato", "estou procurando", "preciso comprar", "vou comprar",
+  "alguém sabe", "alguem sabe", "estou pensando em comprar", "preciso de"
 ];
-const SELL_PATTERNS = ["estou vendendo", "vendo ", "minha loja", "revendedor", "chama no direct", "faço entrega", "faco entrega"];
+
+const WEAK_BUY_PATTERNS = ["onde comprar", "onde consigo", "onde está barato", "onde esta barato"];
+const STRONG_SELL_PATTERNS = [
+  "estou vendendo", "vendo ", "minha loja", "revendedor", "chama no direct", "faço entrega", "faco entrega",
+  "compre agora", "loja oficial", "enquanto durarem os estoques", "estoque limitado", "últimas unidades", "ultimas unidades"
+];
+const COMMERCIAL_PATTERNS = [
+  "promoção", "promocao", "oferta", "cupom", "frete grátis", "frete gratis", "parcelas de",
+  "em até 10x", "em ate 10x", "preço da época", "preco da epoca", "aproveite", "estoque"
+];
+const CONVERSATIONAL_PATTERNS = [
+  "eu quero", "quero comprar", "estou procurando", "estou pensando", "preciso comprar", "preciso de",
+  "alguém sabe", "alguem sabe", "alguém recomenda", "alguem recomenda", "vocês recomendam", "voces recomendam",
+  "me recomendam", "manda link", "tem link"
+];
 const URGENT_PATTERNS = ["hoje", "agora", "urgente", "preciso hoje", "comprar hoje"];
 
 function normalize(value: string) {
@@ -18,23 +33,46 @@ function band(score: number): LeadBand {
   return "Sinal fraco";
 }
 
+function parseMoney(raw: string) {
+  const cleaned = raw.replace(/\s+/g, "").replace(/\./g, "").replace(",", ".");
+  const value = Number(cleaned);
+  if (!Number.isFinite(value) || value < 20 || value > 100000) return null;
+  if (value >= 1900 && value <= 2099) return null;
+  return value;
+}
+
 function extractBudget(text: string): number | null {
-  const matches = text.match(/(?:r\$\s*)?(\d{2,5})(?:[.,](\d{2}))?/gi);
-  if (!matches) return null;
-  const values = matches
-    .map((raw) => Number(raw.replace(/r\$\s*/i, "").replace(".", "").replace(",", ".")))
-    .filter((n) => Number.isFinite(n) && n >= 20 && n <= 100000);
-  return values[0] ?? null;
+  const candidates: string[] = [];
+
+  for (const match of text.matchAll(/r\$\s*(\d{2,6}(?:\.\d{3})*(?:,\d{1,2})?)/gi)) {
+    candidates.push(match[1]);
+  }
+  for (const match of text.matchAll(/\b(\d{2,6}(?:\.\d{3})*(?:,\d{1,2})?)\s*reais\b/gi)) {
+    candidates.push(match[1]);
+  }
+  for (const match of text.matchAll(/(?:até|ate|orçamento(?:\s+de)?|orcamento(?:\s+de)?|posso gastar|tenho até|tenho ate)\s*(?:r\$\s*)?(\d{2,6}(?:\.\d{3})*(?:,\d{1,2})?)/gi)) {
+    candidates.push(match[1]);
+  }
+
+  for (const candidate of candidates) {
+    const value = parseMoney(candidate);
+    if (value != null) return value;
+  }
+  return null;
 }
 
 function recencyWeight(publishedAt?: string) {
-  if (!publishedAt) return 100;
-  const ms = Date.now() - new Date(publishedAt).getTime();
-  const days = ms / 86_400_000;
+  if (!publishedAt) return 45;
+  const timestamp = new Date(publishedAt).getTime();
+  if (!Number.isFinite(timestamp)) return 45;
+  const ms = Date.now() - timestamp;
+  if (ms < -86_400_000) return 45;
+  const days = Math.max(0, ms / 86_400_000);
   if (days <= 1) return 100;
   if (days <= 3) return 90;
   if (days <= 7) return 75;
   if (days <= 30) return 50;
+  if (days <= 180) return 35;
   return 20;
 }
 
@@ -45,23 +83,42 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   const customBuyPatterns = campaign?.intentPhrases ?? [];
   const buyPatterns = [...new Set([...BUY_PATTERNS, ...customBuyPatterns])];
 
-  const sellHit = SELL_PATTERNS.find((p) => t.includes(normalize(p)));
-  if (sellHit) {
-    signals.push("Parece ser oferta de vendedor");
-    intentScore = 8;
-  } else {
-    const hits = buyPatterns.filter((p) => t.includes(normalize(p)));
-    if (hits.length) {
-      intentScore += Math.min(60, hits.length * 24);
-      signals.push("Intenção explícita ou pedido de recomendação");
-    }
-    if (/\?|recomenda|melhor|vale a pena|preco|preço|frete|link/.test(t)) {
-      intentScore += 15;
-      signals.push("Pesquisa preço, recomendação, frete ou link");
-    }
-    if (URGENT_PATTERNS.some((p) => t.includes(normalize(p)))) {
-      intentScore += 10;
-      signals.push("Indício de urgência");
+  const hits = buyPatterns.filter((p) => t.includes(normalize(p)));
+  const weakHits = hits.filter((p) => WEAK_BUY_PATTERNS.some((weak) => normalize(weak) === normalize(p)));
+  const strongHits = hits.filter((p) => !weakHits.includes(p));
+  const strongSellHit = STRONG_SELL_PATTERNS.find((p) => t.includes(normalize(p)));
+  const commercialHits = COMMERCIAL_PATTERNS.filter((p) => t.includes(normalize(p)));
+  const conversational = CONVERSATIONAL_PATTERNS.some((p) => t.includes(normalize(p)));
+  const clearlyCommercial = Boolean(strongSellHit) || commercialHits.length >= 2;
+
+  if (strongHits.length) {
+    intentScore += Math.min(56, strongHits.length * 28);
+    signals.push("Intenção pessoal de compra ou pedido direto de recomendação");
+  }
+  if (weakHits.length) {
+    intentScore += Math.min(16, weakHits.length * 8);
+    signals.push("Sinal genérico de pesquisa de compra");
+  }
+  if (conversational) {
+    intentScore += 12;
+    signals.push("Linguagem conversacional compatível com potencial comprador");
+  }
+  if (/\?|recomenda|melhor|vale a pena|preco|frete|link/.test(t)) {
+    intentScore += strongHits.length || conversational ? 10 : 5;
+    signals.push("Pesquisa preço, recomendação, frete ou link");
+  }
+  if (URGENT_PATTERNS.some((p) => t.includes(normalize(p)))) {
+    intentScore += 10;
+    signals.push("Indício de urgência");
+  }
+
+  if (clearlyCommercial) {
+    if (strongHits.length || conversational) {
+      intentScore -= 30;
+      signals.push("Conteúdo mistura sinal de comprador com linguagem comercial; score reduzido");
+    } else {
+      intentScore = Math.min(intentScore, 8);
+      signals.push("Parece ser anúncio, oferta ou conteúdo de vendedor");
     }
   }
 
@@ -77,13 +134,16 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
 
   intentScore = Math.max(0, Math.min(100, intentScore));
   const recency = recencyWeight(publishedAt);
+  if (!publishedAt) signals.push("Data da publicação não confirmada; recência recebeu peso neutro");
   const combined = Math.round(intentScore * 0.68 + relevance * 0.22 + recency * 0.10);
-  const score = sellHit ? Math.min(combined, 25) : Math.max(0, Math.min(100, combined));
+  const score = clearlyCommercial && !strongHits.length && !conversational
+    ? Math.min(combined, 25)
+    : Math.max(0, Math.min(100, combined));
   const budget = extractBudget(text);
-  if (budget) signals.push(`Orçamento/valor detectado: R$ ${budget.toLocaleString("pt-BR")}`);
+  if (budget) signals.push(`Orçamento em reais detectado: R$ ${budget.toLocaleString("pt-BR")}`);
 
   const urgency = URGENT_PATTERNS.some((p) => t.includes(normalize(p))) ? "alta" : /essa semana|em breve/.test(t) ? "média" : null;
-  const intent = sellHit ? "sell" : score >= 80 ? "buy" : score >= 55 ? "research" : "weak";
+  const intent = clearlyCommercial && score < 55 ? "sell" : score >= 80 ? "buy" : score >= 55 ? "research" : "weak";
 
   return {
     score,
