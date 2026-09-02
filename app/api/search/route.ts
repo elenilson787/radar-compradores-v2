@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { searchHasData } from "@/lib/hasdata";
 import { searchPublicComments } from "@/lib/comments";
+import { searchFacebookPublicComments } from "@/lib/facebook-comments";
 import { analyzeText } from "@/lib/scoring";
 import { applyAttributionGuard } from "@/lib/source-quality";
 import type { Campaign, Source } from "@/lib/types";
@@ -67,11 +68,27 @@ export async function POST(request: NextRequest) {
 
   const startedAt = Date.now();
   const publicationSearch = await searchHasData(campaign, apiKey);
-  const commentSearch = await searchPublicComments(campaign, apiKey, publicationSearch.results);
+
+  // O coletor genérico continua responsável por Reddit/Instagram/TikTok.
+  // Facebook é tratado separadamente para garantir autoria do comentário.
+  const nonFacebookCampaign: Campaign = {
+    ...campaign,
+    sources: campaign.sources.filter((source) => source !== "Facebook"),
+  };
+
+  const [commentSearch, facebookCommentSearch] = await Promise.all([
+    searchPublicComments(
+      nonFacebookCampaign,
+      apiKey,
+      publicationSearch.results.filter((item) => item.source !== "Facebook")
+    ),
+    searchFacebookPublicComments(campaign, apiKey, publicationSearch.results),
+  ]);
 
   const combined = [
     ...publicationSearch.results.map((item) => ({ ...item, kind: "publication" as const })),
     ...commentSearch.results,
+    ...facebookCommentSearch.results,
   ];
 
   const seen = new Set<string>();
@@ -93,13 +110,20 @@ export async function POST(request: NextRequest) {
     return analysis.score >= campaign.minimumScore;
   });
 
-  const warnings = [...publicationSearch.warnings, ...commentSearch.warnings];
+  const warnings = [
+    ...publicationSearch.warnings,
+    ...commentSearch.warnings,
+    ...facebookCommentSearch.warnings,
+  ];
+  const commentsFound = commentSearch.results.length + facebookCommentSearch.results.length;
+  const commentPagesChecked = commentSearch.pagesChecked + facebookCommentSearch.pagesChecked;
+
   return NextResponse.json({
-    queryCount: publicationSearch.queries.length + commentSearch.apiCalls,
+    queryCount: publicationSearch.queries.length + commentSearch.apiCalls + facebookCommentSearch.apiCalls,
     found: uniqueResults.length,
     qualified: qualifiedResults.length,
-    commentsFound: commentSearch.results.length,
-    commentPagesChecked: commentSearch.pagesChecked,
+    commentsFound,
+    commentPagesChecked,
     results: qualifiedResults,
     warnings,
     elapsedMs: Date.now() - startedAt,
