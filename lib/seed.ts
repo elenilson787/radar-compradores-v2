@@ -35,6 +35,4 @@ export const initialLeads: Lead[] = [
   }
 ];
 
-export const initialRuns: SearchRun[] = [
-  { id: "run_1", campaignId: "camp_casa", startedAt: new Date().toISOString(), queries: 0, found: 0, saved: 0, status: "Concluída" },
-];
+export const initialRuns: SearchRun[] = [];
