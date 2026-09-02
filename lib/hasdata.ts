@@ -22,18 +22,30 @@ const SITE_BY_SOURCE: Partial<Record<Source, string>> = {
 
 const DEFAULT_INTENT = ["quero comprar", "onde comprar", "alguém recomenda"];
 const AUTOMATIC_COMMERCIAL_EXCLUSIONS = ["promoção", "oferta", "cupom", "compre agora", "enquanto durarem os estoques"];
-const WEB_RETAIL_EXCLUSIONS = ["amazon.com.br", "mercadolivre.com.br", "shopee.com.br", "magazineluiza.com.br"];
+const WEB_RETAIL_EXCLUSIONS = [
+  "amazon.com.br", "mercadolivre.com.br", "shopee.com.br", "magazineluiza.com.br",
+  "reclameaqui.com.br", "zoom.com.br", "buscape.com.br", "promobit.com.br", "pelando.com.br"
+];
 const NON_BUYER_PROFILE_PATTERNS = [
   "loja", "store", "shop", "shopping", "oficial", "eletrodomesticos", "eletrodomésticos",
   "magazine", "varejo", "revenda", "distribuidora", "fabricante", "receitas", "almanaque",
-  "portal", "blog", "revista", "canal", "dicas", "havan", "britania", "britânia", "elgin",
-  "philco", "mondial", "electrolux", "oster", "arno", "midea", "amazon", "mercado livre",
-  "shopee", "magalu", "magazine luiza", "casas bahia", "carrefour", "fast shop"
+  "portal", "blog", "revista", "canal", "dicas", "achadinhos", "ofertas", "promoções", "promocoes",
+  "review", "reviews", "comparativo", "custo benefício", "custo beneficio", "rainha da", "rei da",
+  "reclame aqui", "havan", "britania", "britânia", "elgin", "philco", "mondial", "electrolux",
+  "oster", "arno", "midea", "amazon", "mercado livre", "shopee", "magalu", "magazine luiza",
+  "casas bahia", "carrefour", "fast shop"
 ];
 const ACCESSORY_PATTERNS = [
   "borracha", "borrachas", "grelha", "grelhas", "cesto", "cestos", "grade", "grades",
   "peça", "peca", "peças", "pecas", "acessório", "acessorio", "acessórios", "acessorios",
   "resistência", "resistencia", "cabo", "cabos", "bandeja", "bandejas"
+];
+const INDEXED_COMMENT_MARKERS = [
+  "responder", "respondeu", "comments", "comment", "comentários", "comentarios", "likes", "curtidas"
+];
+const BUY_CONTEXT_TERMS = [
+  "quero comprar", "preciso comprar", "estou procurando", "onde comprar", "onde consigo",
+  "alguém recomenda", "alguem recomenda", "qual comprar", "me recomendam", "eu quero"
 ];
 
 function quote(value: string) {
@@ -55,6 +67,30 @@ function looksLikeAccessoryPurchase(text: string) {
   const purchase = "comprar|procurando|preciso de|onde encontro|onde comprar|quero comprar";
   return new RegExp(`(?:${purchase}).{0,45}(?:${accessory})`).test(t)
     || new RegExp(`(?:${accessory}).{0,45}(?:${purchase})`).test(t);
+}
+
+function ambiguousIndexedComment(text: string, campaign: Campaign) {
+  const t = normalize(text);
+  const markerIndexes = INDEXED_COMMENT_MARKERS
+    .map((marker) => t.indexOf(normalize(marker)))
+    .filter((index) => index >= 0);
+  if (!markerIndexes.length) return false;
+  const firstMarker = Math.min(...markerIndexes);
+  const terms = [...new Set([...BUY_CONTEXT_TERMS, ...campaign.intentPhrases])];
+  const intentIndexes = terms
+    .map((term) => t.indexOf(normalize(term)))
+    .filter((index) => index >= 0);
+  if (!intentIndexes.length) return false;
+  return Math.min(...intentIndexes) > firstMarker;
+}
+
+function inferSource(plannedSource: Source, url: string): Source {
+  const lower = url.toLowerCase();
+  if (lower.includes("facebook.com")) return "Facebook";
+  if (lower.includes("instagram.com")) return "Instagram";
+  if (lower.includes("tiktok.com")) return "TikTok";
+  if (lower.includes("reddit.com")) return "Reddit";
+  return plannedSource;
 }
 
 export function buildHasDataQueries(campaign: Campaign): PlannedQuery[] {
@@ -184,14 +220,18 @@ export async function searchHasData(campaign: Campaign, apiKey: string) {
         const snippet = cleanText(result.snippet);
         const dateLabel = cleanText(result.date);
         const publicationUrl = cleanText(result.link);
-        const profileName = cleanText(result.source) || cleanText(result.displayedLink) || title || "Resultado público";
+        const rawSource = cleanText(result.source);
+        const displayedLink = cleanText(result.displayedLink);
+        const profileName = rawSource || displayedLink || title || "Resultado público";
         const baseText = [title, snippet].filter(Boolean).join(" — ");
         const publicationText = dateLabel ? `${baseText} — Data exibida pelo Google: ${dateLabel}` : baseText;
         if (!publicationUrl || !publicationText) return null;
         if (profileLooksLikeNonBuyer(profileName)) return null;
         if (looksLikeAccessoryPurchase(publicationText)) return null;
+        if (ambiguousIndexedComment(publicationText, campaign)) return null;
         const publishedAt = dateFromResult(result, publicationText);
-        return { source, profileName, publicationUrl, publicationText, publishedAt } satisfies PublicSearchResult;
+        const inferredSource = inferSource(source, publicationUrl);
+        return { source: inferredSource, profileName, publicationUrl, publicationText, publishedAt } satisfies PublicSearchResult;
       }).filter((item): item is PublicSearchResult => Boolean(item));
     } catch (error) {
       warnings.push(`${source}: ${error instanceof Error ? error.message : "falha de consulta"}`);

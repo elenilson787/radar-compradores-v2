@@ -24,14 +24,19 @@ const CONVERSATIONAL_PATTERNS = [
 const NON_BUYER_PROFILE_PATTERNS = [
   "loja", "store", "shop", "shopping", "oficial", "eletrodomesticos", "eletrodomésticos",
   "magazine", "varejo", "revenda", "distribuidora", "fabricante", "receitas", "almanaque",
-  "portal", "blog", "revista", "canal", "dicas", "havan", "britania", "britânia", "elgin",
-  "philco", "mondial", "electrolux", "oster", "arno", "midea", "amazon", "mercado livre",
-  "shopee", "magalu", "magazine luiza", "casas bahia", "carrefour", "fast shop"
+  "portal", "blog", "revista", "canal", "dicas", "achadinhos", "ofertas", "promoções", "promocoes",
+  "review", "reviews", "comparativo", "custo benefício", "custo beneficio", "rainha da", "rei da",
+  "reclame aqui", "havan", "britania", "britânia", "elgin", "philco", "mondial", "electrolux",
+  "oster", "arno", "midea", "amazon", "mercado livre", "shopee", "magalu", "magazine luiza",
+  "casas bahia", "carrefour", "fast shop"
 ];
 const ACCESSORY_PATTERNS = [
   "borracha", "borrachas", "grelha", "grelhas", "cesto", "cestos", "grade", "grades",
   "peça", "peca", "peças", "pecas", "acessório", "acessorio", "acessórios", "acessorios",
   "resistência", "resistencia", "cabo", "cabos", "bandeja", "bandejas", "forma", "formas"
+];
+const INDEXED_COMMENT_MARKERS = [
+  "responder", "respondeu", "comments", "comment", "comentários", "comentarios", "likes", "curtidas"
 ];
 const URGENT_PATTERNS = ["hoje", "agora", "urgente", "preciso hoje", "comprar hoje"];
 
@@ -55,17 +60,9 @@ function parseMoney(raw: string) {
 
 function extractBudget(text: string): number | null {
   const candidates: string[] = [];
-
-  for (const match of text.matchAll(/r\$\s*(\d{2,6}(?:\.\d{3})*(?:,\d{1,2})?)/gi)) {
-    candidates.push(match[1]);
-  }
-  for (const match of text.matchAll(/\b(\d{2,6}(?:\.\d{3})*(?:,\d{1,2})?)\s*reais\b/gi)) {
-    candidates.push(match[1]);
-  }
-  for (const match of text.matchAll(/(?:até|ate|orçamento(?:\s+de)?|orcamento(?:\s+de)?|posso gastar|tenho até|tenho ate)\s*(?:r\$\s*)?(\d{2,6}(?:\.\d{3})*(?:,\d{1,2})?)/gi)) {
-    candidates.push(match[1]);
-  }
-
+  for (const match of text.matchAll(/r\$\s*(\d{2,6}(?:\.\d{3})*(?:,\d{1,2})?)/gi)) candidates.push(match[1]);
+  for (const match of text.matchAll(/\b(\d{2,6}(?:\.\d{3})*(?:,\d{1,2})?)\s*reais\b/gi)) candidates.push(match[1]);
+  for (const match of text.matchAll(/(?:até|ate|orçamento(?:\s+de)?|orcamento(?:\s+de)?|posso gastar|tenho até|tenho ate)\s*(?:r\$\s*)?(\d{2,6}(?:\.\d{3})*(?:,\d{1,2})?)/gi)) candidates.push(match[1]);
   for (const candidate of candidates) {
     const value = parseMoney(candidate);
     if (value != null) return value;
@@ -90,7 +87,6 @@ function dateFromText(text: string) {
     const date = new Date(Date.UTC(Number(pt[3]), months[pt[2]], Number(pt[1]), 12));
     if (date.getTime() <= Date.now() + 86_400_000) return date.toISOString();
   }
-
   return undefined;
 }
 
@@ -119,6 +115,21 @@ function accessoryPurchaseTarget(text: string) {
     || new RegExp(`(?:${accessory}).{0,45}(?:${purchase})`).test(t);
 }
 
+function indexedCommentAttributionIsAmbiguous(text: string, patterns: string[]) {
+  const t = normalize(text);
+  const markerIndexes = INDEXED_COMMENT_MARKERS
+    .map((marker) => t.indexOf(normalize(marker)))
+    .filter((index) => index >= 0);
+  if (!markerIndexes.length) return false;
+  const firstMarker = Math.min(...markerIndexes);
+  const intentIndexes = patterns
+    .map((pattern) => t.indexOf(normalize(pattern)))
+    .filter((index) => index >= 0);
+  if (!intentIndexes.length) return false;
+  const firstIntent = Math.min(...intentIndexes);
+  return firstIntent > firstMarker;
+}
+
 export function analyzeText(text: string, campaign?: Campaign, publishedAt?: string, profileName?: string): Analysis {
   const t = normalize(text);
   const profile = normalize(profileName ?? "");
@@ -135,6 +146,7 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   const conversational = CONVERSATIONAL_PATTERNS.some((p) => t.includes(normalize(p)));
   const profileLooksNonBuyer = Boolean(profile) && NON_BUYER_PROFILE_PATTERNS.some((p) => profile.includes(normalize(p)));
   const accessoryTarget = accessoryPurchaseTarget(text);
+  const ambiguousIndexedComment = indexedCommentAttributionIsAmbiguous(text, [...buyPatterns, ...CONVERSATIONAL_PATTERNS]);
   const clearlyCommercial = Boolean(strongSellHit) || commercialHits.length >= 2;
 
   if (strongHits.length) {
@@ -173,6 +185,11 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
     signals.push("O perfil de origem parece ser marca, loja, mídia ou página temática; não identifica diretamente o comprador");
   }
 
+  if (ambiguousIndexedComment) {
+    intentScore -= 35;
+    signals.push("A intenção de compra aparece somente após marcador de comentário; não é seguro atribuí-la ao perfil exibido");
+  }
+
   const products = campaign?.products ?? [];
   const matchedProduct = products.find((p) => t.includes(normalize(p))) ?? null;
   let relevance = products.length === 0 ? 100 : matchedProduct ? 100 : 25;
@@ -197,6 +214,7 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
 
   let score = Math.max(0, Math.min(100, combined));
   if (profileLooksNonBuyer) score = Math.min(score, 40);
+  else if (ambiguousIndexedComment) score = Math.min(score, 45);
   else if (accessoryTarget && matchedProduct) score = Math.min(score, 50);
   else if (strongSellHit) score = Math.min(score, 35);
   else if (clearlyCommercial && !strongHits.length && !conversational) score = Math.min(score, 25);
@@ -205,7 +223,7 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   if (budget) signals.push(`Orçamento em reais detectado: R$ ${budget.toLocaleString("pt-BR")}`);
 
   const urgency = URGENT_PATTERNS.some((p) => t.includes(normalize(p))) ? "alta" : /essa semana|em breve/.test(t) ? "média" : null;
-  const intent = profileLooksNonBuyer || accessoryTarget || (clearlyCommercial && score < 55)
+  const intent = profileLooksNonBuyer || ambiguousIndexedComment || accessoryTarget || (clearlyCommercial && score < 55)
     ? "weak"
     : score >= 80 ? "buy" : score >= 55 ? "research" : "weak";
 

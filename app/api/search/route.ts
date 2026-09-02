@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { searchHasData } from "@/lib/hasdata";
+import { analyzeText } from "@/lib/scoring";
 import type { Campaign, Source } from "@/lib/types";
 
 const ALLOWED_SOURCES = new Set<Source>(["Facebook", "Instagram", "TikTok", "Reddit", "Web"]);
@@ -64,10 +65,21 @@ export async function POST(request: NextRequest) {
 
   const startedAt = Date.now();
   const result = await searchHasData(campaign, apiKey);
+  const qualifiedResults = result.results.filter((item) => {
+    const analysis = analyzeText(
+      item.publicationText,
+      campaign,
+      item.publishedAt ?? undefined,
+      item.profileName
+    );
+    return analysis.score >= campaign.minimumScore;
+  });
+
   return NextResponse.json({
     queryCount: result.queries.length,
     found: result.results.length,
-    results: result.results,
+    qualified: qualifiedResults.length,
+    results: qualifiedResults,
     warnings: result.warnings,
     elapsedMs: Date.now() - startedAt,
   });
