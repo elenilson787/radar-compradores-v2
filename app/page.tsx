@@ -1,3 +1,5 @@
-import App from "@/components/App";
+import CloudGate from "@/components/CloudGate";
 
-export default function Home() { return <App />; }
+export default function Home() {
+  return <CloudGate />;
+}
