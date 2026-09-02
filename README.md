@@ -2,9 +2,11 @@
 
 Evolução do MVP "Intenção Pública / Radar de Compradores".
 
-## O que já está implementado nesta Fase 1
+## Estado atual
 
 - visual inspirado na prévia original;
+- autenticação por e-mail e senha via Supabase;
+- persistência de campanhas e leads com RLS;
 - campanhas com produtos, frases de intenção, palavras negativas e score mínimo;
 - Radar com filtros por rede, status, score e texto;
 - ordenação por maior score;
@@ -15,10 +17,30 @@ Evolução do MVP "Intenção Pública / Radar de Compradores".
 - distinção básica comprador x vendedor;
 - deduplicação por fingerprint;
 - análise manual de publicação;
-- histórico de execuções preparado;
-- tela de integrações preparada para HasData;
-- persistência local no navegador para testes;
-- migration SQL do Supabase com RLS, inclusive para sinais dos leads, para a próxima etapa.
+- histórico de execuções persistido em `search_runs`;
+- integração de busca pública HasData/Google SERP no servidor;
+- botão **Buscar agora** protegido por sessão do Supabase;
+- filtro automático pelo score mínimo da campanha antes de salvar oportunidades.
+
+## Busca pública
+
+A busca usa o endpoint Google SERP da HasData no servidor da Vercel. A chave nunca é enviada ao navegador.
+
+Por execução, o Radar:
+
+1. gera uma consulta por fonte habilitada na campanha;
+2. busca resultados públicos;
+3. limita o lote a até 50 resultados brutos;
+4. remove duplicatas;
+5. aplica o classificador do Radar;
+6. salva somente resultados com score igual ou superior ao mínimo da campanha;
+7. registra contagens e avisos em `search_runs`.
+
+Para ativar a busca, configure na Vercel:
+
+```text
+HASDATA_API_KEY=...
+```
 
 ## Rodar localmente
 
@@ -29,16 +51,16 @@ npm run dev
 
 Abra `http://localhost:3000`.
 
-## Próxima etapa — Fase 2
+## Variáveis de ambiente
 
-1. conectar o projeto a um Supabase real;
-2. substituir localStorage por persistência autenticada;
-3. adicionar `HASDATA_API_KEY` somente no servidor;
-4. criar gerador de consultas por campanha;
-5. implementar `Buscar agora`;
-6. deduplicar e classificar cada resultado retornado;
-7. preencher a aba Execuções com custos/contagens reais.
+```text
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+HASDATA_API_KEY=
+```
 
-## Segurança de configuração
+## Segurança
 
-Nunca exponha `HASDATA_API_KEY` ou `SUPABASE_SERVICE_ROLE_KEY` no cliente. Use variáveis de ambiente do servidor/Vercel.
+- `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` é a chave pública destinada ao cliente e o acesso aos dados é protegido por RLS.
+- `HASDATA_API_KEY` deve existir somente no ambiente de servidor/Vercel.
+- `SUPABASE_SERVICE_ROLE_KEY` não é necessária para o fluxo atual e não deve ser exposta ao cliente.
