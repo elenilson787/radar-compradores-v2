@@ -16,6 +16,24 @@ const GENERIC_SOCIAL_PROFILES = new Set([
   "resultado publico", "resultado público", "perfil publico", "perfil público"
 ]);
 
+const SELLER_CTA_PATTERNS = [
+  "digite eu quero",
+  "digite \"eu quero\"",
+  "comente eu quero",
+  "comente \"eu quero\"",
+  "comenta eu quero",
+  "comenta \"eu quero\"",
+  "comente aqui eu quero",
+  "para receber o link",
+  "receber o link por dm",
+  "receba o link",
+  "para nossa equipe entrar em contato",
+  "para a nossa equipe entrar em contato",
+  "nossa equipe entrar em contato",
+  "comente para receber",
+  "digite para receber"
+];
+
 export function normalizeSourceText(value: string) {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 }
@@ -34,6 +52,24 @@ function structuredSocialAuthor(profileName: string) {
   const match = profile.match(/^(facebook|instagram|tiktok|reddit)\s*[·|-]\s*(.+)$/);
   if (!match?.[2]?.trim()) return null;
   return { network: match[1], author: match[2].trim() };
+}
+
+function publicationLooksLikeSellerCta(publicationText: string) {
+  const text = normalizeSourceText(publicationText)
+    .replace(/[“”'‘’]/g, "\"")
+    .replace(/[:!,.]/g, " ")
+    .replace(/\s+/g, " ");
+  return SELLER_CTA_PATTERNS.some((pattern) => {
+    const normalizedPattern = normalizeSourceText(pattern)
+      .replace(/[“”'‘’]/g, "\"")
+      .replace(/[:!,.]/g, " ")
+      .replace(/\s+/g, " ");
+    return text.includes(normalizedPattern);
+  });
+}
+
+function isTrustedPublicComment(publicationText: string) {
+  return normalizeSourceText(publicationText).startsWith("comentario publico em publicacao sobre");
 }
 
 export function profileLooksLikeNonBuyer(profileName: string) {
@@ -88,31 +124,41 @@ function weakBand(): LeadBand {
   return "Sinal fraco";
 }
 
+function weakAnalysis(analysis: Analysis, score: number, signal: string, relevance?: number): Analysis {
+  return {
+    ...analysis,
+    score: Math.min(analysis.score, score),
+    band: weakBand(),
+    intent: "weak",
+    relevance: relevance == null ? analysis.relevance : Math.min(analysis.relevance, relevance),
+    signals: analysis.signals.includes(signal) ? analysis.signals : [...analysis.signals, signal],
+    reason: signal,
+  };
+}
+
 export function applyAttributionGuard(analysis: Analysis, profileName: string, publicationText: string): Analysis {
+  if (!isTrustedPublicComment(publicationText) && publicationLooksLikeSellerCta(publicationText)) {
+    return weakAnalysis(
+      analysis,
+      25,
+      "Publicação é uma chamada de vendedor para o público comentar ou pedir o link; o lead é o comentarista, não a página que publicou"
+    );
+  }
+
   if (purchaseTargetsAnotherItem(analysis, publicationText)) {
-    const score = Math.min(analysis.score, 45);
-    const signal = "A pessoa parece já possuir o produto monitorado; a intenção de compra está direcionada a outro item";
-    return {
-      ...analysis,
-      score,
-      band: weakBand(),
-      intent: "weak",
-      relevance: Math.min(analysis.relevance, 40),
-      signals: analysis.signals.includes(signal) ? analysis.signals : [...analysis.signals, signal],
-      reason: signal,
-    };
+    return weakAnalysis(
+      analysis,
+      45,
+      "A pessoa parece já possuir o produto monitorado; a intenção de compra está direcionada a outro item",
+      40
+    );
   }
 
   if (!profileLooksLikeNonBuyer(profileName)) return analysis;
 
-  const score = Math.min(analysis.score, 40);
-  const signal = "Origem parece ser marca, página temática ou rede sem autor comprador identificável; atribuição rebaixada";
-  return {
-    ...analysis,
-    score,
-    band: weakBand(),
-    intent: "weak",
-    signals: analysis.signals.includes(signal) ? analysis.signals : [...analysis.signals, signal],
-    reason: signal,
-  };
+  return weakAnalysis(
+    analysis,
+    40,
+    "Origem parece ser marca, página temática ou rede sem autor comprador identificável; atribuição rebaixada"
+  );
 }
