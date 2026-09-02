@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { analyzeText } from "./scoring";
 import { applyAttributionGuard } from "./source-quality";
+import { createFingerprint } from "./dedupe";
 import type { Campaign, Lead, LeadStatus, SearchRun, Source } from "./types";
 
 type CloudState = {
@@ -13,6 +14,14 @@ function runStatus(value: string): SearchRun["status"] {
   if (value === "running") return "Executando";
   if (value === "failed") return "Falhou";
   return "Concluída";
+}
+
+function preferLead(current: Lead, candidate: Lead) {
+  if (current.source === "Web" && candidate.source !== "Web") return candidate;
+  if (candidate.source === "Web" && current.source !== "Web") return current;
+  if (candidate.analysis.score > current.analysis.score) return candidate;
+  if (candidate.analysis.score < current.analysis.score) return current;
+  return new Date(candidate.createdAt).getTime() > new Date(current.createdAt).getTime() ? candidate : current;
 }
 
 export async function loadCloudState(supabase: SupabaseClient): Promise<CloudState> {
@@ -39,12 +48,15 @@ export async function loadCloudState(supabase: SupabaseClient): Promise<CloudSta
   }));
 
   const campaignMap = new Map(campaigns.map((campaign) => [campaign.id, campaign]));
-  const leads: Lead[] = (leadsResult.data ?? []).map((row) => {
+  const mappedLeads: Lead[] = (leadsResult.data ?? []).map((row) => {
     const campaign = campaignMap.get(row.campaign_id);
     const publishedAt = row.published_at || row.created_at;
     const profileName = row.profile_name || "Perfil público";
-    const rawAnalysis = analyzeText(row.publication_text, campaign, publishedAt, profileName);
-    const analysis = applyAttributionGuard(rawAnalysis, profileName, row.publication_text);
+    const publicationUrl = row.publication_url || "#";
+    const publicationText = row.publication_text;
+    const rawAnalysis = analyzeText(publicationText, campaign, publishedAt, profileName);
+    const analysis = applyAttributionGuard(rawAnalysis, profileName, publicationText);
+    const fingerprint = createFingerprint(row.source as Source, publicationUrl, publicationText);
 
     return {
       id: row.id,
@@ -52,15 +64,22 @@ export async function loadCloudState(supabase: SupabaseClient): Promise<CloudSta
       source: row.source as Source,
       profileName,
       profileUrl: row.profile_url || undefined,
-      publicationUrl: row.publication_url || "#",
-      publicationText: row.publication_text,
+      publicationUrl,
+      publicationText,
       publishedAt,
       createdAt: row.created_at,
       status: row.status as LeadStatus,
       analysis,
-      fingerprint: row.fingerprint,
+      fingerprint,
     };
   });
+
+  const leadMap = new Map<string, Lead>();
+  for (const lead of mappedLeads) {
+    const existing = leadMap.get(lead.fingerprint);
+    leadMap.set(lead.fingerprint, existing ? preferLead(existing, lead) : lead);
+  }
+  const leads = [...leadMap.values()].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   const runs: SearchRun[] = (runsResult.data ?? []).map((row) => ({
     id: row.id,
