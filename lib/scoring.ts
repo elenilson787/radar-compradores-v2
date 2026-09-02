@@ -61,9 +61,32 @@ function extractBudget(text: string): number | null {
   return null;
 }
 
-function recencyWeight(publishedAt?: string) {
-  if (!publishedAt) return 45;
-  const timestamp = new Date(publishedAt).getTime();
+function dateFromText(text: string) {
+  const english = text.match(/\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+(?:19|20)\d{2}\b/i)?.[0];
+  if (english) {
+    const parsed = Date.parse(english);
+    if (Number.isFinite(parsed) && parsed <= Date.now() + 86_400_000) return new Date(parsed).toISOString();
+  }
+
+  const months: Record<string, number> = {
+    janeiro: 0, fevereiro: 1, marco: 2, abril: 3, maio: 4, junho: 5,
+    julho: 6, agosto: 7, setembro: 8, outubro: 9, novembro: 10, dezembro: 11,
+  };
+  const normalized = normalize(text);
+  const pt = normalized.match(/\b(\d{1,2})\s+de\s+(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\s+de\s+((?:19|20)\d{2})\b/);
+  if (pt) {
+    const date = new Date(Date.UTC(Number(pt[3]), months[pt[2]], Number(pt[1]), 12));
+    if (date.getTime() <= Date.now() + 86_400_000) return date.toISOString();
+  }
+
+  return undefined;
+}
+
+function recencyWeight(publishedAt?: string, text?: string) {
+  const explicitTextDate = text ? dateFromText(text) : undefined;
+  const effectiveDate = explicitTextDate ?? publishedAt;
+  if (!effectiveDate) return 45;
+  const timestamp = new Date(effectiveDate).getTime();
   if (!Number.isFinite(timestamp)) return 45;
   const ms = Date.now() - timestamp;
   if (ms < -86_400_000) return 45;
@@ -133,8 +156,10 @@ export function analyzeText(text: string, campaign?: Campaign, publishedAt?: str
   }
 
   intentScore = Math.max(0, Math.min(100, intentScore));
-  const recency = recencyWeight(publishedAt);
-  if (!publishedAt) signals.push("Data da publicação não confirmada; recência recebeu peso neutro");
+  const explicitTextDate = dateFromText(text);
+  const recency = recencyWeight(publishedAt, text);
+  if (!publishedAt && !explicitTextDate) signals.push("Data da publicação não confirmada; recência recebeu peso neutro");
+  if (explicitTextDate) signals.push("Data da publicação identificada no resultado público");
   const combined = Math.round(intentScore * 0.68 + relevance * 0.22 + recency * 0.10);
   const score = clearlyCommercial && !strongHits.length && !conversational
     ? Math.min(combined, 25)
